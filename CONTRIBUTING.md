@@ -62,6 +62,46 @@ If a change would blur that line, it probably belongs on the other side of it.
 
 ---
 
+## Layout
+
+```
+wildfire/
+├── docs/                    # design rationale: taxonomy, walkthroughs, planning agent
+├── backend/                 # FastAPI + LangGraph (uv)
+│   ├── src/wildfire_agent/
+│   │   ├── llm.py           # the only LLM entry point, provider agnostic
+│   │   ├── mock_llm.py      # LLM_PROVIDER=mock: full pipeline, no key
+│   │   ├── taxonomy.py      # domain vocabulary
+│   │   ├── contract.py      # the Analysis Contract
+│   │   ├── events.py        # the SSE wire contract
+│   │   ├── geocoding.py     # spatial grounding (Nominatim)
+│   │   ├── graph/           # the six pipeline stages, plus prompts
+│   │   ├── planning/        # Planning Agent: capabilities, planner, executor
+│   │   ├── cli.py           # command line demo
+│   │   └── api.py           # FastAPI + SSE
+│   ├── data/altadena/       # snapshotted showcase layers, with provenance
+│   ├── scripts/             # fetch_showcase_data.py - re-snapshot from source
+│   └── tests/               # no network, no API key
+└── frontend/                # Next.js + React + Tailwind + MapLibre
+    ├── lib/                 # SSE client, session hook, contract types
+    └── components/          # Sidebar / PipelineStepper / MapView / ContractCard / ChatPanel
+```
+
+### Backend endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET  /api/health` | Is the LLM ready, and is it the mock? |
+| `GET  /api/taxonomy` | Enums, slot matrix, capability catalogue, study area |
+| `GET  /api/schema/contract` | JSON Schema, for generating TypeScript types |
+| `POST /api/sessions` | Create a session |
+| `POST /api/sessions/{id}/messages` | Send a message, receive an SSE stream |
+
+One endpoint serves both the opening question and a clarification answer; the backend decides
+which by checking whether the session is parked on an interrupt.
+
+---
+
 ## Three sources of truth
 
 Work out which one owns the thing you are changing, and **do not restate it anywhere else**.
