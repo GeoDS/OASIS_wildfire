@@ -1,19 +1,23 @@
 # Wildfire Analyst Agent
 
-A two-agent geospatial system that **defines the question before it answers it**.
+A multi-agent geospatial system that **defines the question before it answers it**.
 
-The **User Goal Agent** turns a natural-language request into an *Analysis Contract*: what kind of
-question it is, who is asking, which families of data it needs, and where on the ground. The
-**Planning Agent** then reads that contract, picks the layers that answer it, and draws them.
+Two agents are implemented so far. The **User Goal Agent** turns a natural-language request into an
+*Analysis Contract*: what kind of question it is, who is asking, which families of data it needs,
+and where on the ground. The **Planning Agent** reads that contract, picks the layers that answer
+it, and draws them.
 
 ```
 User Prompt → Requirement Understanding → Task Compiler
             → Ambiguity Resolution → Analysis Contract      ← User Goal Agent
             → Layer Selection → Fetch & Render               ← Planning Agent
+            → …                                              ← further agents
 ```
 
-The contract is the only thing that crosses between them. That is what keeps the boundary real:
-the first agent never picks a dataset, and an incomplete contract is never analysed.
+A structured contract passing between stages is the seam the pipeline extends along: each agent
+consumes what the one before it produced, so a new stage can be added without the earlier ones
+changing. It is also what keeps the current boundary real — the User Goal Agent never picks a
+dataset, and an incomplete contract is never analysed.
 
 Showcase area: **Altadena, California — the Eaton Fire of January 2025.**
 

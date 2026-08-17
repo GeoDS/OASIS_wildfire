@@ -42,23 +42,27 @@ instead of milliseconds, something acquired a real client — find it and stub i
 
 ## The shape of the system
 
-Two agents. The **User Goal Agent** defines the problem; the **Planning Agent** answers it.
+A pipeline of agents, two of them implemented so far. The **User Goal Agent** defines the problem;
+the **Planning Agent** answers it. More stages are expected downstream.
 
 ```
 User Prompt → Requirement Understanding → Task Compiler
             → Ambiguity Resolution → Analysis Contract        ← User Goal Agent
             → Layer Selection → Fetch & Render                 ← Planning Agent
+            → …                                                ← further agents
 ```
 
-**The Analysis Contract is the only thing that crosses between them.** That is the one invariant
-worth protecting:
+**Each agent talks to the next only through a structured artifact** — today that is the Analysis
+Contract, between the two that exist. This is the invariant worth protecting, and the reason the
+pipeline can grow without earlier stages being rewritten:
 
 - The User Goal Agent never picks a dataset, never fetches, never renders.
 - The Planning Agent never re-interprets the user's wording; it reads the contract.
 - An incomplete contract is not analysed at all — the graph routes to the end with the gaps
   recorded. Running analysis on unresolved ambiguity is the error this project exists to prevent.
 
-If a change would blur that line, it probably belongs on the other side of it.
+If a change would blur that line, it probably belongs on the other side of it. When you add a
+stage, give it its own artifact rather than widening the contract to carry both jobs.
 
 ---
 
