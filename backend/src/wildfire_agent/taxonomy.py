@@ -158,11 +158,20 @@ HAZARD_OBJECTS: dict[str, HazardObject] = {
     for ho in (
         # ── hazard tier: the hazard itself ──────────────────────────
         HazardObject(
-            "active_fire", "hazard", "Active fire",
-            ("fire perimeter", "hotspot location", "detection time", "detection confidence",
-             "fire size"),
-            ("official fire perimeters (IRWIN/WFIGS family)",
-             "satellite hotspots (VIIRS/MODIS/HMS family)"),
+            "active_fire",
+            "hazard",
+            "Active fire",
+            (
+                "fire perimeter",
+                "hotspot location",
+                "detection time",
+                "detection confidence",
+                "fire size",
+            ),
+            (
+                "official fire perimeters (IRWIN/WFIGS family)",
+                "satellite hotspots (VIIRS/MODIS/HMS family)",
+            ),
             (
                 DataFamilyChoice(
                     "official_fire_perimeters",
@@ -181,16 +190,22 @@ HAZARD_OBJECTS: dict[str, HazardObject] = {
             ),
         ),
         HazardObject(
-            "fire_spread", "hazard", "Fire spread",
+            "fire_spread",
+            "hazard",
+            "Fire spread",
             ("rate of spread", "spread direction", "fire front position", "time step"),
-            ("fire behaviour models (FARSITE/FlamMap family)",
-             "time-series hotspot differencing"),
+            ("fire behaviour models (FARSITE/FlamMap family)", "time-series hotspot differencing"),
         ),
         HazardObject(
-            "smoke_plume", "hazard", "Smoke and air quality",
+            "smoke_plume",
+            "hazard",
+            "Smoke and air quality",
             ("plume polygon", "density class", "PM2.5", "observation time"),
-            ("satellite smoke analysis (HMS family)", "air quality monitoring networks",
-             "smoke dispersion models"),
+            (
+                "satellite smoke analysis (HMS family)",
+                "air quality monitoring networks",
+                "smoke dispersion models",
+            ),
             (
                 DataFamilyChoice(
                     "satellite_plume_extent",
@@ -209,62 +224,113 @@ HAZARD_OBJECTS: dict[str, HazardObject] = {
             ),
         ),
         HazardObject(
-            "fire_weather", "hazard", "Fire weather",
-            ("wind speed", "wind direction", "temperature", "relative humidity",
-             "fire danger index"),
+            "fire_weather",
+            "hazard",
+            "Fire weather",
+            (
+                "wind speed",
+                "wind direction",
+                "temperature",
+                "relative humidity",
+                "fire danger index",
+            ),
             ("weather forecast services (NWS family)", "fire danger rating products"),
         ),
         HazardObject(
-            "fuel", "hazard", "Fuels",
-            ("fuel model", "vegetation type", "fuel load", "fuel moisture",
-             "canopy characteristics"),
+            "fuel",
+            "hazard",
+            "Fuels",
+            (
+                "fuel model",
+                "vegetation type",
+                "fuel load",
+                "fuel moisture",
+                "canopy characteristics",
+            ),
             ("land cover / fuel maps (LANDFIRE family)", "vegetation index remote sensing"),
         ),
         # ── exposure tier: who or what is affected ──────────────────
         HazardObject(
-            "exposure", "exposure", "Population and building exposure",
+            "exposure",
+            "exposure",
+            "Population and building exposure",
             ("population count", "building footprints", "housing density", "WUI boundary"),
             ("census demographics", "building footprints", "WUI layers"),
         ),
         HazardObject(
-            "vulnerability", "exposure", "Social vulnerability",
-            ("age structure", "income", "no-vehicle households", "language isolation",
-             "mobility limitation"),
+            "vulnerability",
+            "exposure",
+            "Social vulnerability",
+            (
+                "age structure",
+                "income",
+                "no-vehicle households",
+                "language isolation",
+                "mobility limitation",
+            ),
             ("social vulnerability indices (SVI/CDC family)", "census demographics"),
         ),
         HazardObject(
-            "infrastructure", "exposure", "Lifeline infrastructure",
+            "infrastructure",
+            "exposure",
+            "Lifeline infrastructure",
             ("road network", "power lines", "communication sites", "water facilities"),
-            ("road networks (TIGER family)", "utility assets",
-             "critical infrastructure (HIFLD family)"),
+            (
+                "road networks (TIGER family)",
+                "utility assets",
+                "critical infrastructure (HIFLD family)",
+            ),
         ),
         HazardObject(
-            "critical_facility", "exposure", "Critical facilities",
+            "critical_facility",
+            "exposure",
+            "Critical facilities",
             ("hospital/fire/police/school/shelter locations", "capacity"),
             ("POI and facility point data (HIFLD/OSM family)",),
         ),
         HazardObject(
-            "ecological_asset", "exposure", "Ecological and water assets",
+            "ecological_asset",
+            "exposure",
+            "Ecological and water assets",
             ("watershed", "habitat", "protected area", "soil erosion risk"),
             ("protected area boundaries", "watershed layers", "habitat maps"),
         ),
         # ── action tier: what people do about it ────────────────────
         HazardObject(
-            "evacuation", "action", "Evacuation",
-            ("evacuation zone", "evacuation route", "network accessibility", "travel time",
-             "shelter"),
+            "evacuation",
+            "action",
+            "Evacuation",
+            (
+                "evacuation zone",
+                "evacuation route",
+                "network accessibility",
+                "travel time",
+                "shelter",
+            ),
             ("official evacuation orders", "road network + routing", "accessibility analysis"),
         ),
         HazardObject(
-            "suppression_resource", "action", "Suppression resources",
-            ("crew/equipment location and count", "control lines", "water sources",
-             "response time"),
+            "suppression_resource",
+            "action",
+            "Suppression resources",
+            (
+                "crew/equipment location and count",
+                "control lines",
+                "water sources",
+                "response time",
+            ),
             ("incident resource summaries (ICS/SIT family)", "water source inventories"),
         ),
         HazardObject(
-            "mitigation_treatment", "action", "Mitigation and fuel treatment",
-            ("treatment unit boundary", "treatment type and year", "prescribed burn records",
-             "priority"),
+            "mitigation_treatment",
+            "action",
+            "Mitigation and fuel treatment",
+            (
+                "treatment unit boundary",
+                "treatment type and year",
+                "prescribed burn records",
+                "priority",
+            ),
             ("treatment records (NFPORS family)", "forest management plans"),
         ),
     )
@@ -308,23 +374,40 @@ Requirement = Literal["B", "D", "O"]
 
 INTENT_SLOT_MATRIX: dict[str, dict[str, Requirement]] = {
     "observation": {
-        "location": "B", "time_horizon": "D", "target": "D", "requested_output": "D",
+        "location": "B",
+        "time_horizon": "D",
+        "target": "D",
+        "requested_output": "D",
     },
     "assessment": {
-        "location": "B", "time_horizon": "D", "target": "B", "requested_output": "D",
+        "location": "B",
+        "time_horizon": "D",
+        "target": "B",
+        "requested_output": "D",
         "threshold": "O",
     },
     "prediction": {
-        "location": "B", "time_horizon": "B", "target": "D", "requested_output": "D",
+        "location": "B",
+        "time_horizon": "B",
+        "target": "D",
+        "requested_output": "D",
         "scenario": "O",
     },
     "decision_support": {
-        "location": "B", "time_horizon": "D", "target": "B", "requested_output": "D",
-        "threshold": "O", "comparison_basis": "B",
+        "location": "B",
+        "time_horizon": "D",
+        "target": "B",
+        "requested_output": "D",
+        "threshold": "O",
+        "comparison_basis": "B",
     },
     "evaluation_adaptation": {
-        "location": "B", "time_horizon": "B", "target": "B", "requested_output": "D",
-        "threshold": "O", "intervention": "B",
+        "location": "B",
+        "time_horizon": "B",
+        "target": "B",
+        "requested_output": "D",
+        "threshold": "O",
+        "intervention": "B",
     },
 }
 
@@ -387,6 +470,7 @@ def required_slots(intents: list[str]) -> dict[str, SlotRequirement]:
 # ══════════════════════════════════════════════════════════════════
 # Prompt fragment builders - keep prompts from drifting away from the code
 # ══════════════════════════════════════════════════════════════════
+
 
 def _bullets(mapping: dict[str, str]) -> str:
     return "\n".join(f"- `{k}`: {v}" for k, v in mapping.items())

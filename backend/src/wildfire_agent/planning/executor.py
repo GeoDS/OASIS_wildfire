@@ -13,6 +13,9 @@ lying to the user:
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from copy import deepcopy
+from math import isfinite
 from typing import Any
 
 from ..contract import AnalysisContract
@@ -61,55 +64,184 @@ def _intersects(geometry: dict, bbox: tuple[float, float, float, float]) -> bool
     return not (max(xs) < w or min(xs) > e or max(ys) < s or min(ys) > n)
 
 
+def validate_bbox(values: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """Validate the browser-to-backend GeoJSON bbox contract."""
+    bbox = tuple(float(value) for value in values)
+    if not all(isfinite(value) for value in bbox):
+        raise ValueError("bbox coordinates must be finite numbers")
+    west, south, east, north = bbox
+    if west >= east or south >= north:
+        raise ValueError("bbox must be ordered [west, south, east, north]")
+    if not (-180 <= west <= 180 and -180 <= east <= 180):
+        raise ValueError("bbox longitude must be between -180 and 180")
+    if not (-90 <= south <= 90 and -90 <= north <= 90):
+        raise ValueError("bbox latitude must be between -90 and 90")
+    return bbox
+
+
+def _clip_ring(
+    coordinates: list[list[float]],
+    bbox: tuple[float, float, float, float],
+) -> list[list[float]]:
+    """Sutherland-Hodgman clip of one polygon ring to an axis-aligned bbox."""
+    if len(coordinates) < 3:
+        return []
+    points = [[float(point[0]), float(point[1])] for point in coordinates]
+    if points[0] == points[-1]:
+        points.pop()
+
+    west, south, east, north = bbox
+    edges: list[
+        tuple[Callable[[list[float]], bool], Callable[[list[float], list[float]], list[float]]]
+    ] = [
+        (
+            lambda point: point[0] >= west,
+            lambda start, end: [
+                west,
+                start[1] + (end[1] - start[1]) * (west - start[0]) / (end[0] - start[0]),
+            ],
+        ),
+        (
+            lambda point: point[0] <= east,
+            lambda start, end: [
+                east,
+                start[1] + (end[1] - start[1]) * (east - start[0]) / (end[0] - start[0]),
+            ],
+        ),
+        (
+            lambda point: point[1] >= south,
+            lambda start, end: [
+                start[0] + (end[0] - start[0]) * (south - start[1]) / (end[1] - start[1]),
+                south,
+            ],
+        ),
+        (
+            lambda point: point[1] <= north,
+            lambda start, end: [
+                start[0] + (end[0] - start[0]) * (north - start[1]) / (end[1] - start[1]),
+                north,
+            ],
+        ),
+    ]
+
+    output = points
+    for inside, intersection in edges:
+        incoming = output
+        output = []
+        if not incoming:
+            break
+        start = incoming[-1]
+        for end in incoming:
+            start_inside, end_inside = inside(start), inside(end)
+            if end_inside:
+                if not start_inside:
+                    output.append(intersection(start, end))
+                output.append(end)
+            elif start_inside:
+                output.append(intersection(start, end))
+            start = end
+
+    if len(output) < 3:
+        return []
+    output.append(output[0])
+    return output
+
+
+def _clip_geometry(
+    geometry: dict,
+    bbox: tuple[float, float, float, float],
+) -> dict | None:
+    """Clip the geometry types used by local demo datasets to ``bbox``."""
+    geometry_type = geometry.get("type")
+    coordinates = geometry.get("coordinates")
+    west, south, east, north = bbox
+
+    if geometry_type == "Point" and coordinates:
+        lon, lat = coordinates[:2]
+        return deepcopy(geometry) if west <= lon <= east and south <= lat <= north else None
+
+    if geometry_type == "MultiPoint" and coordinates:
+        clipped = [
+            point
+            for point in coordinates
+            if west <= point[0] <= east and south <= point[1] <= north
+        ]
+        return {**geometry, "coordinates": clipped} if clipped else None
+
+    if geometry_type == "Polygon" and coordinates:
+        rings = [_clip_ring(ring, bbox) for ring in coordinates]
+        rings = [ring for ring in rings if ring]
+        return {**geometry, "coordinates": rings} if rings else None
+
+    if geometry_type == "MultiPolygon" and coordinates:
+        polygons = []
+        for polygon in coordinates:
+            rings = [_clip_ring(ring, bbox) for ring in polygon]
+            rings = [ring for ring in rings if ring]
+            if rings:
+                polygons.append(rings)
+        return {**geometry, "coordinates": polygons} if polygons else None
+
+    # No current local capability uses lines. Keep the previous envelope filter
+    # as an explicit fallback so a future source is not silently discarded.
+    return deepcopy(geometry) if _intersects(geometry, bbox) else None
+
+
+def clip_local_layer(
+    capability_id: str,
+    bbox: tuple[float, float, float, float],
+) -> LayerResult:
+    """Load one allow-listed local capability and clip its geometry to the request bbox."""
+    bbox = validate_bbox(bbox)
+    cap = CAPABILITIES[capability_id]
+    try:
+        raw = load_layer(cap.id)
+    except FileNotFoundError as exc:
+        return LayerResult(
+            capability_id=cap.id,
+            title=cap.title,
+            hazard_object=cap.hazard_object,
+            family=cap.family,
+            geometry_type=cap.geometry_type,
+            caveat=f"Layer unavailable: {exc}",
+            feature_count=0,
+            source="unavailable",
+            geojson={"type": "FeatureCollection", "features": []},
+        )
+
+    matching = []
+    for feature in raw.get("features", []):
+        geometry = feature.get("geometry")
+        if not geometry:
+            continue
+        clipped = _clip_geometry(geometry, bbox)
+        if clipped:
+            matching.append({**feature, "geometry": clipped})
+
+    provenance = raw.get("provenance", {})
+    truncated = len(matching) > MAX_FEATURES
+    return LayerResult(
+        capability_id=cap.id,
+        title=cap.title,
+        hazard_object=cap.hazard_object,
+        family=cap.family,
+        geometry_type=cap.geometry_type,
+        caveat=cap.caveat,
+        feature_count=len(matching),
+        truncated=truncated,
+        source=provenance.get("source", "unknown"),
+        as_of=provenance.get("as_of"),
+        retrieved_at=provenance.get("retrieved_at"),
+        geojson={"type": "FeatureCollection", "features": matching[:MAX_FEATURES]},
+    )
+
+
 def execute(plan: ExecutionPlan, contract: AnalysisContract) -> list[LayerResult]:
     bbox = _bbox_for(contract)
     results: list[LayerResult] = []
 
     for planned in plan.layers:
-        cap = CAPABILITIES[planned.capability_id]
-        try:
-            raw = load_layer(cap.id)
-        except FileNotFoundError as exc:
-            results.append(
-                LayerResult(
-                    capability_id=cap.id,
-                    title=cap.title,
-                    hazard_object=cap.hazard_object,
-                    family=cap.family,
-                    geometry_type=cap.geometry_type,
-                    caveat=f"Layer unavailable: {exc}",
-                    feature_count=0,
-                    source="unavailable",
-                    geojson={"type": "FeatureCollection", "features": []},
-                )
-            )
-            continue
-
-        provenance = raw.get("provenance", {})
-        matching = [
-            f for f in raw.get("features", []) if f.get("geometry") and _intersects(f["geometry"], bbox)
-        ]
-        truncated = len(matching) > MAX_FEATURES
-
-        results.append(
-            LayerResult(
-                capability_id=cap.id,
-                title=cap.title,
-                hazard_object=cap.hazard_object,
-                family=cap.family,
-                geometry_type=cap.geometry_type,
-                caveat=cap.caveat,
-                feature_count=len(matching),
-                truncated=truncated,
-                source=provenance.get("source", "unknown"),
-                as_of=provenance.get("as_of"),
-                retrieved_at=provenance.get("retrieved_at"),
-                geojson={
-                    "type": "FeatureCollection",
-                    "features": matching[:MAX_FEATURES],
-                },
-            )
-        )
+        results.append(clip_local_layer(planned.capability_id, bbox))
 
     return results
 
@@ -122,7 +254,11 @@ def summarise(results: list[LayerResult], plan: ExecutionPlan) -> str:
     empty = [r for r in results if not r.feature_count]
 
     if drawn:
-        parts = [f"{r.feature_count} {'feature' if r.feature_count == 1 else 'features'} of {r.title.lower()}" for r in drawn]
+        parts = [
+            f"{r.feature_count} "
+            f"{'feature' if r.feature_count == 1 else 'features'} of {r.title.lower()}"
+            for r in drawn
+        ]
         lines.append("Drawn on the map: " + "; ".join(parts) + ".")
     if empty:
         # Empty is a result, not a failure - say it plainly rather than hiding it.

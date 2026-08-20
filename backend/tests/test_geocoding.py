@@ -1,12 +1,46 @@
 """Pure-function tests for spatial grounding. No network."""
 
+from types import SimpleNamespace
+
 from wildfire_agent.geocoding import (
     GeocodeCandidate,
+    _local_fire_candidates,
+    _local_fire_gazetteer,
     bbox_from_center,
     haversine_km,
     is_ambiguous,
     normalize_query,
+    normalize_socal_place_query,
+    resolve_local_fire,
 )
+
+
+def test_local_fire_name_resolves_from_catalog_before_place_geocoding(monkeypatch):
+    dataset = SimpleNamespace(
+        event_name="Bobcat Fire area",
+        spatial_scope="Angeles NF | 34.33, -117.93",
+    )
+    monkeypatch.setattr(
+        "wildfire_agent.geocoding.scan_local_data",
+        lambda _root: SimpleNamespace(datasets=[dataset]),
+    )
+    _local_fire_gazetteer.cache_clear()
+    try:
+        candidates = _local_fire_candidates("Show me the Bobcat Fire")
+        assert len(candidates) == 1
+        assert candidates[0].display_name == "Bobcat Fire"
+        assert candidates[0].source == "local_fire_catalog"
+        assert candidates[0].lon == -117.93
+        assert candidates[0].lat == 34.33
+        assert _local_fire_candidates("Eaton Fire near Altadena") == []
+        resolved = resolve_local_fire("Show me the Bobcat Fire")
+        assert resolved is not None
+        assert resolved.display_name == "Bobcat Fire"
+        assert resolved.center == (-117.93, 34.33)
+        assert resolve_local_fire("show weather in Santa Barbara") is None
+        assert resolve_local_fire("show weather in Santa Barbara, not fire") is None
+    finally:
+        _local_fire_gazetteer.cache_clear()
 
 
 def _c(name: str, lon: float, lat: float, importance: float = 0.5) -> GeocodeCandidate:
@@ -47,6 +81,9 @@ class TestNormalizeQuery:
 
     def test_buffer_only_input_keeps_something_queryable(self):
         assert normalize_query("10 km") == "10 km"
+
+    def test_corrects_santa_barbara_typo_with_california_scope(self):
+        assert normalize_socal_place_query("santa babara la") == "Santa Barbara, California"
 
 
 class TestAmbiguity:

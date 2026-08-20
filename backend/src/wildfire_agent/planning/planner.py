@@ -37,6 +37,7 @@ _HISTORICAL_RE = re.compile(
 # What we ask the model for
 # ══════════════════════════════════════════════════════════════════
 
+
 class LayerChoice(BaseModel):
     capability_id: str = Field(description="Must be an id from the supplied catalogue")
     reason: str = Field(description="One sentence: why this layer answers the contract")
@@ -112,6 +113,7 @@ def _contract_digest(contract: AnalysisContract) -> str:
 # Deterministic floor
 # ══════════════════════════════════════════════════════════════════
 
+
 def wants_history(contract: AnalysisContract) -> bool:
     slot = contract.slots.get("time_horizon")
     text = " ".join(filter(None, [slot.value if slot else None, contract.original_request]))
@@ -184,6 +186,7 @@ def _to_planned(cap: Capability, reason: str) -> PlannedLayer:
 # Validation
 # ══════════════════════════════════════════════════════════════════
 
+
 def validate_proposal(contract: AnalysisContract, proposal: PlanProposal) -> ExecutionPlan:
     """Turn a model proposal into a plan, dropping anything it was not allowed to do."""
     families = selected_families(contract)
@@ -231,8 +234,7 @@ def validate_proposal(contract: AnalysisContract, proposal: PlanProposal) -> Exe
                 )
             )
             notes.append(
-                f"Added {cap.title}: the user chose this data family and the "
-                f"proposal left it out."
+                f"Added {cap.title}: the user chose this data family and the proposal left it out."
             )
 
     # A proposal that ignores the requested time window is answering a different

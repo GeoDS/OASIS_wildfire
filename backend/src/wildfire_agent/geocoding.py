@@ -10,24 +10,29 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 import httpx
 
 from .config import settings
 from .contract import ResolvedLocation
+from .local_catalog import scan_local_data
+from .request_intent import requests_fire
 
 #: Offline fallback gazetteer. Used only when Nominatim is unreachable, and the
 #: `geocoder` field then says `fallback_gazetteer` - **provenance must stay
 #: honest**. Same discipline as the ban on filling analysis results with mock data.
 FALLBACK_GAZETTEER: dict[str, tuple[float, float, str]] = {
+    "santa barbara": (-119.6982, 34.4208, "Santa Barbara, California, USA"),
+    "santa babara": (-119.6982, 34.4208, "Santa Barbara, California, USA"),
     "altadena": (-118.1312, 34.1897, "Altadena, Los Angeles County, California, USA"),
     "eaton": (-118.0692, 34.2035, "Eaton Canyon, Los Angeles County, California, USA"),
     "pasadena": (-118.1445, 34.1478, "Pasadena, Los Angeles County, California, USA"),
     "los angeles county": (-118.2437, 34.0522, "Los Angeles County, California, USA"),
 }
 
-#: Buffer used when "near X" comes without a radius. Recorded in `assumptions`
-#: and drawn on the map for confirmation.
+#: Search envelope used when "near X" comes without a radius. It is recorded in
+#: `assumptions` but never drawn or interpreted as a subject/impact boundary.
 DEFAULT_BUFFER_KM = 25.0
 
 #: Beyond this distance two candidates cannot be spellings of the same place.
@@ -90,13 +95,91 @@ def normalize_query(raw: str) -> str:
         text = stripped
 
 
+def normalize_socal_place_query(raw: str) -> str:
+    """Apply narrow demo aliases before a Southern California geocoder lookup."""
+    normalized = normalize_query(raw)
+    if re.search(r"\bsanta\s+babara\b", normalized, re.IGNORECASE):
+        return "Santa Barbara, California"
+    return normalized
+
+
+def _normalise_fire_name(value: str) -> str:
+    ignored = {"fire", "area", "county", "co"}
+    return " ".join(word for word in re.findall(r"[a-z0-9]+", value.lower()) if word not in ignored)
+
+
+@lru_cache(maxsize=1)
+def _local_fire_gazetteer() -> tuple[tuple[str, GeocodeCandidate], ...]:
+    """Build event centres from the local catalog instead of a UI-maintained list."""
+    entries: dict[str, GeocodeCandidate] = {}
+    try:
+        datasets = scan_local_data(settings.resolved_local_data_root).datasets
+    except (FileNotFoundError, OSError):
+        return ()
+    for dataset in datasets:
+        if (
+            not dataset.event_name
+            or not re.search(r"\bfire\b", dataset.event_name, re.IGNORECASE)
+            or not dataset.spatial_scope
+        ):
+            continue
+        match = re.search(
+            r"(?P<lat>-?\d{1,2}(?:\.\d+)?),\s*(?P<lon>-?\d{1,3}(?:\.\d+)?)",
+            dataset.spatial_scope,
+        )
+        if not match:
+            continue
+        key = _normalise_fire_name(dataset.event_name)
+        entries[key] = GeocodeCandidate(
+            display_name=dataset.event_name.removesuffix(" area"),
+            lon=float(match.group("lon")),
+            lat=float(match.group("lat")),
+            source="local_fire_catalog",
+        )
+    return tuple(entries.items())
+
+
+def _local_fire_candidates(query: str) -> list[GeocodeCandidate]:
+    normalized = f" {_normalise_fire_name(query)} "
+    matches = [
+        (len(key), candidate)
+        for key, candidate in _local_fire_gazetteer()
+        if key and f" {key} " in normalized
+    ]
+    if not matches:
+        return []
+    return [max(matches, key=lambda item: item[0])[1]]
+
+
+def resolve_local_fire(
+    query: str,
+    *,
+    buffer_km: float | None = None,
+) -> ResolvedLocation | None:
+    """Resolve only named fires present in the local catalog; never call the web."""
+    if not requests_fire(query):
+        return None
+    candidates = _local_fire_candidates(query)
+    if not candidates:
+        return None
+    best = candidates[0]
+    radius = DEFAULT_BUFFER_KM if buffer_km is None else buffer_km
+    return ResolvedLocation(
+        display_name=best.display_name,
+        center=(best.lon, best.lat),
+        buffer_km=radius,
+        bbox=bbox_from_center(best.lon, best.lat, radius),
+        geocoder=best.source,
+        confirmed_by_user=False,
+    )
+
+
 def bbox_from_center(lon: float, lat: float, buffer_km: float) -> tuple[float, float, float, float]:
     """Bounding box of a circular buffer. [west, south, east, north]
 
     One degree of latitude is about 111.32 km; longitude shrinks by cos(lat).
-    This equirectangular approximation is fine at demo scale (<= 100 km); a real
-    projection is needed for anything larger. The frontend's
-    `MapView.circlePolygon` uses the same maths - change one, change the other.
+    This equirectangular approximation is fine for the hidden demo retrieval
+    envelope (<= 100 km); a real projection is needed for anything larger.
     """
     d_lat = buffer_km / 111.32
     d_lon = buffer_km / (111.32 * max(math.cos(math.radians(lat)), 1e-6))
@@ -141,9 +224,17 @@ _CACHE: dict[str, list[GeocodeCandidate]] = {}
 _CACHE_MAX = 256
 
 
-async def geocode(query: str, *, limit: int = 5) -> list[GeocodeCandidate]:
+async def geocode(
+    query: str,
+    *,
+    limit: int = 5,
+) -> list[GeocodeCandidate]:
     """Query Nominatim, falling back to the offline table. Never invents coordinates."""
-    normalized = normalize_query(query)
+    if requests_fire(query):
+        local_fire = _local_fire_candidates(query)
+        if local_fire:
+            return local_fire
+    normalized = normalize_socal_place_query(query)
     cached = _CACHE.get(normalized)
     if cached is not None:
         return cached
@@ -153,6 +244,9 @@ async def geocode(query: str, *, limit: int = 5) -> list[GeocodeCandidate]:
         "format": "jsonv2",
         "limit": str(limit),
         "addressdetails": "0",
+        "countrycodes": "us",
+        "viewbox": "-121.0,36.0,-114.0,32.5",
+        "bounded": "1",
     }
     headers = {"User-Agent": settings.geocoder_user_agent}
 
@@ -162,7 +256,7 @@ async def geocode(query: str, *, limit: int = 5) -> list[GeocodeCandidate]:
             resp.raise_for_status()
             payload = resp.json()
     except (httpx.HTTPError, ValueError):
-        return _fallback(query)
+        return _fallback(normalized)
 
     candidates = [
         GeocodeCandidate(
@@ -176,7 +270,7 @@ async def geocode(query: str, *, limit: int = 5) -> list[GeocodeCandidate]:
         if "lon" in item and "lat" in item
     ]
     candidates.sort(key=lambda c: c.importance, reverse=True)
-    result = candidates or _fallback(query)
+    result = candidates or _fallback(normalized)
 
     # Cache successes only. Caching a rate-limit or timeout would pin the whole
     # demo to the fallback gazetteer after a single blip.

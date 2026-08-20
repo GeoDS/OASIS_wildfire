@@ -3,5 +3,6 @@ packages: []
 # sharp is the native module behind next/image raster optimisation (downloads a prebuilt binary).
 # pnpm 11 defaults to strict-dep-builds=true, so an unapproved build script fails the install.
 allowBuilds:
-  esbuild: set this to true or false
+  # Vitest uses esbuild to compile TypeScript tests.
+  esbuild: true
   sharp: true

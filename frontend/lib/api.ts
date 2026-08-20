@@ -6,10 +6,24 @@
  * right below and it is short.
  */
 
-import type { ExpertiseLevel, Health, Taxonomy } from "./types";
+import type {
+  ExpertiseLevel,
+  FireLifecycle,
+  Health,
+  LocalCapability,
+  LocalLayerResponse,
+  LocalRasterCatalog,
+  PublicLayerResponse,
+  PublicSource,
+  RasterLayerResult,
+  Taxonomy,
+} from "./types";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
+
+export const resolveApiUrl = (url: string) =>
+  url.startsWith("http") ? url : `${API_BASE}${url}`;
 
 export interface SseEvent {
   event: string;
@@ -24,6 +38,75 @@ async function getJson<T>(path: string): Promise<T> {
 
 export const getHealth = () => getJson<Health>("/api/health");
 export const getTaxonomy = () => getJson<Taxonomy>("/api/taxonomy");
+
+export interface PublicLayerRequest {
+  source: PublicSource;
+  day?: string;
+  latitude?: number;
+  longitude?: number;
+  start_year?: number;
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`${path} → HTTP ${res.status} ${detail}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const fetchPublicLayer = (request: PublicLayerRequest) =>
+  postJson<PublicLayerResponse>("/api/layers/public", request);
+
+export const fetchLocalLayer = (
+  capabilityId: LocalCapability,
+  bbox: [number, number, number, number],
+) =>
+  postJson<LocalLayerResponse>("/api/layers/local", {
+    capability_id: capabilityId,
+    bbox,
+  });
+
+export const getLocalRasterCatalog = () =>
+  getJson<LocalRasterCatalog>("/api/local-data/raster-catalog");
+
+export async function fetchLocalRasterLayer(
+  datasetId: string,
+  bbox: [number, number, number, number],
+  day?: string,
+): Promise<RasterLayerResult> {
+  const result = await postJson<RasterLayerResult>("/api/layers/local-raster", {
+    dataset_id: datasetId,
+    bbox,
+    day,
+  });
+  return {
+    ...result,
+    image_url: resolveApiUrl(result.image_url),
+  };
+}
+
+export async function fetchFireLifecycle(
+  eventId: string,
+  day?: string,
+): Promise<FireLifecycle> {
+  const result = await postJson<FireLifecycle>("/api/layers/fire-lifecycle", {
+    event_id: eventId,
+    day,
+  });
+  return {
+    ...result,
+    layers: result.layers.map((layer) => ({
+      ...layer,
+      image_url: resolveApiUrl(layer.image_url),
+    })),
+  };
+}
 
 export async function createSession(): Promise<string> {
   const res = await fetch(`${API_BASE}/api/sessions`, { method: "POST" });

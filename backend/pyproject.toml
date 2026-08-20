@@ -16,7 +16,12 @@ dependencies = [
     "sse-starlette>=2.2",
     "python-dotenv>=1.0",
     "rich>=13.9",
+    "firescope-socal-mcp",
+    "pyshp>=2.3",
 ]
+
+[tool.uv.sources]
+firescope-socal-mcp = { path = "../mcp", editable = true }
 
 [project.optional-dependencies]
 anthropic = ["langchain-anthropic>=0.3.0"]

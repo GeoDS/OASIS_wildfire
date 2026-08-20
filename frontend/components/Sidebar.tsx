@@ -1,30 +1,22 @@
 "use client";
 
-import type { Health, ShowcaseArea } from "@/lib/types";
+import { DataLayerPanel } from "@/components/DataLayerPanel";
+import type { FireDataStatus, Health } from "@/lib/types";
 
-/**
- * Left column, deliberately empty.
- *
- * What used to live here - pipeline progress and the agent's reading of the
- * user - moved to the stepper above the map and into the contract panel, where
- * both belong. Rather than backfill this space with something plausible, it is
- * held open for product to design: an invented panel is harder to remove later
- * than an obviously blank one.
- *
- * The two things that do stay are session-level, not analysis: which model is
- * running, and which area the showcase dataset covers.
- */
+/** Session controls plus the backend-owned fire-data decision state. */
 export function Sidebar({
   health,
-  area,
+  fireDataStatus,
+  analyzing,
   onReset,
 }: {
   health: Health | null;
-  area: ShowcaseArea | null;
+  fireDataStatus: FireDataStatus | null;
+  analyzing: boolean;
   onReset: () => void;
 }) {
   return (
-    <aside className="flex h-full w-[15rem] shrink-0 flex-col border-r border-paper-300 bg-paper-50">
+    <aside className="flex h-full w-[17rem] shrink-0 flex-col border-r border-paper-300 bg-paper-50">
       <header className="px-5 py-4">
         <h1 className="text-[13.5px] font-semibold leading-tight tracking-tight text-ink-900">
           Wildfire Analyst
@@ -32,24 +24,10 @@ export function Sidebar({
         <p className="mt-0.5 text-[11px] text-ink-400">Multi-agent geospatial analysis</p>
       </header>
 
-      <div className="flex flex-1 items-center justify-center px-5">
-        <div className="w-full rounded-xl border border-dashed border-paper-400 px-4 py-8 text-center">
-          <p className="text-[11.5px] font-medium text-ink-500">To be designed</p>
-          <p className="mt-1 text-[10.5px] leading-[1.45] text-ink-400">
-            Reserved for the data-layer panel once the product design lands.
-          </p>
-        </div>
-      </div>
-
-      {area && (
-        <div className="px-5 pb-4">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-400">
-            Study area
-          </p>
-          <p className="mt-1 text-[12px] font-medium text-ink-900">{area.name}</p>
-          <p className="mt-0.5 text-[10.5px] leading-[1.45] text-ink-400">{area.context}</p>
-        </div>
-      )}
+      <DataLayerPanel
+        status={fireDataStatus}
+        analyzing={analyzing}
+      />
 
       <footer className="flex items-center justify-between gap-2 border-t border-paper-300 px-5 py-3">
         {health && (

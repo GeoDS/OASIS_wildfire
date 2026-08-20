@@ -1,10 +1,10 @@
 """Command line interface - prove the pipeline works here before wiring the UI.
 
-    uv run wildfire                      # interactive
-    uv run wildfire -q "Which areas burned in the Eaton Fire around Altadena?"
-    uv run wildfire --expertise expert -q "..."
-    uv run wildfire --graph              # export the Mermaid architecture diagram
-    uv run wildfire --check              # config self-check, no LLM call
+uv run wildfire                      # interactive
+uv run wildfire -q "Which areas burned in the Eaton Fire around Altadena?"
+uv run wildfire --expertise expert -q "..."
+uv run wildfire --graph              # export the Mermaid architecture diagram
+uv run wildfire --check              # config self-check, no LLM call
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, TypedDict
 
-from ..contract import AnalysisContract, ClarificationQuestion
+from ..contract import AnalysisContract, ClarificationQuestion, SpatialSlot
 from ..planning import ExecutionPlan, LayerResult
 from ..taxonomy import ExpertiseLevel
 from .models import RequirementUnderstanding
@@ -61,6 +61,10 @@ class GoalAgentState(TypedDict, total=False):
     """
 
     original_request: str
+    #: Standalone wording produced by the session context resolver. The raw
+    #: original request remains separate for the contract audit trail.
+    resolved_request: str | None
+    context_resolution: dict | None
     transcript: Annotated[list[TranscriptEntry], _append]
 
     #: Manual expertise pick from the UI. When set, it overrides the inference.
@@ -68,6 +72,16 @@ class GoalAgentState(TypedDict, total=False):
 
     understanding: RequirementUnderstanding | None
     contract: AnalysisContract | None
+
+    #: Last completed spatial subject, supplied by the API for conversational
+    #: follow-ups such as "is there fire nearby?".
+    prior_location: SpatialSlot | None
+
+    #: Last completed TS-SatFire event is separate from location. Keeping the
+    #: event id and selected date prevents "this fire" from being routed as a
+    #: city name on the following turn.
+    prior_fire_event_id: str | None
+    prior_fire_day: str | None
 
     pending_questions: list[ClarificationQuestion]
     clarification_rounds: int

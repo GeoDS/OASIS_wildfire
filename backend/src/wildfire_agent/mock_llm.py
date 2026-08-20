@@ -60,10 +60,20 @@ _HAZARD_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 _EXPERT_MARKERS = (
-    "dataset", "api", "resolution", "parameter", "model", "crs", "geojson",
+    "dataset",
+    "api",
+    "resolution",
+    "parameter",
+    "model",
+    "crs",
+    "geojson",
 )
 _PRACTITIONER_MARKERS = (
-    "planning", "mitigation", "policy", "operational", "jurisdiction",
+    "planning",
+    "mitigation",
+    "policy",
+    "operational",
+    "jurisdiction",
 )
 
 _ROLE_MARKERS: list[tuple[str, tuple[str, ...]]] = [
@@ -73,13 +83,9 @@ _ROLE_MARKERS: list[tuple[str, tuple[str, ...]]] = [
     ("emergency_responder", ("incident", "responder", "deploy", "crew")),
 ]
 
-_LOCATION_RE = re.compile(
-    r"(?:near|around|in|within)\s+([A-Z][A-Za-z\s]{2,30})"
-)
+_LOCATION_RE = re.compile(r"(?:near|around|in|within)\s+([A-Z][A-Za-z\s]{2,30})")
 _MY_PLACE_RE = re.compile(r"my (house|home|neighborhood|area)", re.IGNORECASE)
-_TIME_RE = re.compile(
-    r"(next \d+\s*(?:hours?|days?)|today|tonight)", re.IGNORECASE
-)
+_TIME_RE = re.compile(r"(next \d+\s*(?:hours?|days?)|today|tonight)", re.IGNORECASE)
 
 
 def _find_human(messages: Any) -> str:
@@ -145,6 +151,7 @@ def _detect_location(text: str) -> str | None:
 # ══════════════════════════════════════════════════════════════════
 # One stub per schema
 # ══════════════════════════════════════════════════════════════════
+
 
 def _mock_understanding(messages: Any) -> RequirementUnderstanding:
     request = _find_human(messages).replace("User request:", "").strip()

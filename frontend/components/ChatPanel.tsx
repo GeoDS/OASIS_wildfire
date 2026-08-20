@@ -5,15 +5,21 @@ import { useEffect, useRef, useState } from "react";
 import { ExpertisePicker } from "./ExpertisePicker";
 import type { ChatMessage, ClarificationQuestion, ExpertiseLevel } from "@/lib/types";
 
-// Phrased against the dataset we actually hold. The snapshot is the Eaton Fire
-// of January 2025, so a question implying "right now" would be answered with
-// month-old data - the exact kind of quiet mismatch this project exists to
-// prevent. The third question is deliberately unanswerable, to show the system
-// saying so rather than improvising.
+// Each starter is backed by data this demo actually holds. The follow-up line
+// tells the user how to test context continuity after the first answer.
 const SAMPLE_QUESTIONS = [
-  "Which areas burned in the Eaton Fire around Altadena?",
-  "What fires have burned around Altadena since 2000?",
-  "Where might a fire spread next around Altadena?",
+  {
+    prompt: "Show the lifecycle of the Bobcat Fire on 2020-09-18.",
+    followUp: "Then ask: Which cities were closest to this fire?",
+  },
+  {
+    prompt: "Compare NDVI inside the Bobcat Fire's mapped burned area from the first to the last local record.",
+    followUp: "Then ask: Show only the difference and explain the red areas.",
+  },
+  {
+    prompt: "Show current weather and fire-related conditions in Santa Barbara, California.",
+    followUp: "Then ask: Is there a fire nearby?",
+  },
 ];
 
 function OptionButton({
@@ -133,14 +139,17 @@ export function ChatPanel({
         {messages.length === 0 && (
           <div className="space-y-2">
             <p className="text-[12px] text-ink-500">Try one of the walkthrough scenarios:</p>
-            {SAMPLE_QUESTIONS.map((q) => (
+            {SAMPLE_QUESTIONS.map((question) => (
               <button
-                key={q}
-                onClick={() => onSend(q)}
+                key={question.prompt}
+                onClick={() => onSend(question.prompt)}
                 disabled={busy}
                 className="block w-full rounded-xl border border-paper-300 bg-white px-3.5 py-3 text-left text-[13px] leading-[1.45] text-ink-700 transition hover:border-ember-300 hover:bg-ember-50 hover:text-ink-900 disabled:opacity-50"
               >
-                {q}
+                <span className="block">{question.prompt}</span>
+                <span className="mt-1 block text-[10.5px] text-ink-400">
+                  {question.followUp}
+                </span>
               </button>
             ))}
           </div>

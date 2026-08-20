@@ -60,8 +60,7 @@ SHOWCASE_AREA = {
     "center": (-118.1312, 34.1897),
     "bbox": (-118.28, 34.12, -117.96, 34.32),
     "context": (
-        "Eaton Fire, January 2025. The dataset is a snapshot of that event, not a "
-        "live feed."
+        "Eaton Fire, January 2025. The dataset is a snapshot of that event, not a live feed."
     ),
 }
 

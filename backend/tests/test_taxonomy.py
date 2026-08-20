@@ -54,9 +54,7 @@ def test_requested_output_default_follows_intent():
     assert slot_default("requested_output", ["evaluation_adaptation"]) == "report + map"
     # With several intents the override table key order decides; decision_support
     # precedes evaluation.
-    assert (
-        slot_default("requested_output", ["assessment", "decision_support"]) == "ranking + map"
-    )
+    assert slot_default("requested_output", ["assessment", "decision_support"]) == "ranking + map"
 
 
 def test_slot_without_default_returns_none():

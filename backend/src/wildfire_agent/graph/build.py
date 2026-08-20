@@ -1,14 +1,14 @@
 """Graph assembly.
 
-    START -> requirement_understanding -> task_compiler -+-> ambiguity_resolution -+
-                                                         |         ^         |       |
-                                                         |         +---------+       |
-                                                         +-> analysis_contract <-----+
-                                                                     |
-                        ..... User Goal Agent | Planning Agent ......|.............
-                                                                     |
-                                              (ready?) -> planning -> execution -> END
-                                              (not ready) ---------------------> END
+START -> requirement_understanding -> task_compiler -+-> ambiguity_resolution -+
+                                                     |         ^         |       |
+                                                     |         +---------+       |
+                                                     +-> analysis_contract <-----+
+                                                                 |
+                    ..... User Goal Agent | Planning Agent ......|.............
+                                                                 |
+                                          (ready?) -> planning -> execution -> END
+                                          (not ready) ---------------------> END
 """
 
 from __future__ import annotations

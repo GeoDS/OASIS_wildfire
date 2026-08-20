@@ -98,7 +98,7 @@ export function ContractCard({
       <div className="flex h-full items-center justify-center px-10 text-center">
         <p className="max-w-sm text-[12.5px] leading-[1.6] text-ink-400">
           The Analysis Contract assembles here, field by field. Every answer you give fills a
-          slot, retires an assumption, and tightens the circle on the map.
+          slot, retires an assumption, and grounds the map in the right fire or place geometry.
         </p>
       </div>
     );

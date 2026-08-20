@@ -62,9 +62,7 @@ class TestFamilySelection:
         }
 
     def test_reads_a_single_family(self):
-        assert selected_families(_contract(target="satellite_hotspots")) == {
-            "satellite_hotspots"
-        }
+        assert selected_families(_contract(target="satellite_hotspots")) == {"satellite_hotspots"}
 
     def test_no_target_means_no_constraint(self):
         assert selected_families(_contract(target=None)) == set()
@@ -89,7 +87,9 @@ class TestDeterministicPlan:
 
     def test_history_request_selects_the_historical_layer_only(self):
         plan = deterministic_plan(
-            _contract(request="Show past fires around Altadena since 2000", time_horizon="2000-2024")
+            _contract(
+                request="Show past fires around Altadena since 2000", time_horizon="2000-2024"
+            )
         )
         assert [layer.capability_id for layer in plan.layers] == ["historical_fire_perimeters"]
 
@@ -192,7 +192,9 @@ class TestExecution:
         contract = _contract(hazards=["active_fire", "fire_spread"])
         plan = validate_proposal(
             contract,
-            PlanProposal(layers=[LayerChoice(capability_id="official_fire_perimeters", reason="ok")]),
+            PlanProposal(
+                layers=[LayerChoice(capability_id="official_fire_perimeters", reason="ok")]
+            ),
         )
         text = summarise(execute(plan, contract), plan)
         assert "Not available" in text

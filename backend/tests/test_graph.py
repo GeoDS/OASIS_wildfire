@@ -11,12 +11,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from langgraph.types import Command
 
 from wildfire_agent.contract import (
+    AnalysisContract,
     ClarificationOption,
     ClarificationQuestion,
     ResolvedLocation,
+    ScalarSlot,
     SpatialSlot,
 )
 from wildfire_agent.graph import build_graph
@@ -29,6 +30,7 @@ from wildfire_agent.graph.models import (
     SlotDecision,
     SlotUpdate,
 )
+from wildfire_agent.graph.nodes import _inherit_prior_fire_context, _inherit_prior_location
 from wildfire_agent.planning.planner import LayerChoice, PlanProposal
 
 QUESTION = "Where are the active fires near Altadena?"
@@ -52,7 +54,10 @@ def _understanding() -> RequirementUnderstanding:
         user_role="unknown",
         role_reason="No role signal at all; the golden rule says do not guess",
         role_materially_changes_analysis=False,
-        hazard_objects=["active_fire", "not_a_real_object"],  # the latter must be dropped
+        hazard_objects=[
+            "active_fire",
+            "not_a_real_object",
+        ],  # the latter must be dropped
         hazard_reason="'active fires' matches directly",
         raw_location="near Altadena",
     )
@@ -199,56 +204,35 @@ async def test_scenario_1_end_to_end(stub_llm, stub_geocoder):
         {"original_request": QUESTION, "clarification_rounds": 0}, config=config
     )
 
-    # ── The run must pause for clarification ────────────────────────
-    interrupts = state.get("__interrupt__")
-    assert interrupts, "an empty blocking slot must interrupt"
-    payload = interrupts[0].value
-    assert payload["type"] == "clarification"
-
-    # Only `target` is asked. "near Altadena" grounds fine, so the radius is a
-    # default drawn on the map (rule 2) rather than an interruption: asking
-    # about something the user can confirm visually is wasted friction.
-    assert payload["pending_slots"] == ["target"]
-    assert len(payload["questions"]) == 1
-    # The general level must offer concrete options, never an open question.
-    assert all(q["options"] for q in payload["questions"])
-
-    # The defaulted radius has to be recorded, not used silently.
-    assert any("25 km" in a for a in state["contract"].assumptions)
-
-    # ── Resume ──────────────────────────────────────────────────────
-    state = await graph.ainvoke(Command(resume="both, 10 km"), config=config)
-    assert not state.get("__interrupt__"), "one round should have been enough"
+    # Fire evidence is a backend policy choice, not a product question shown to
+    # the user. A resolvable location therefore completes in one pass.
+    assert not state.get("__interrupt__")
 
     contract = state["contract"]
     assert contract.ready_for_planning
-    assert contract.clarification_rounds == 1
+    assert contract.clarification_rounds == 0
 
-    assert contract.slots["target"].source == "user_stated"
-    assert contract.slots["target"].value == "official_fire_perimeters + satellite_hotspots"
+    assert contract.slots["target"].source == "agent_inferred"
+    assert contract.slots["target"].value == "Officially confirmed fire perimeters"
 
     spatial = contract.slots["location"]
     assert isinstance(spatial, SpatialSlot)
     assert spatial.resolved is not None
-    assert spatial.resolved.buffer_km == pytest.approx(10.0)
+    assert spatial.resolved.buffer_km == pytest.approx(25.0)
     assert spatial.resolved.confirmed_by_user is False
 
-    # Assumptions are **recomputed**, not appended: once the user supplies 10 km,
-    # "assuming 25 km" is no longer true and keeping it misreports the contract.
-    assert not any(a.startswith("Radius not specified") for a in contract.assumptions)
-    # But "not yet confirmed" still holds and must survive.
+    assert any(a.startswith("Radius not specified") for a in contract.assumptions)
     assert any(a.startswith("Spatial scope resolved by the agent") for a in contract.assumptions)
 
 
-async def test_family_disambiguation_promotes_target(stub_llm, stub_geocoder):
-    """The compiler stub leaves `target` non-blocking on purpose. Enforcement in
-    the domain model - not the prompt - is what turns it into a question."""
+async def test_family_disambiguation_is_resolved_by_backend(stub_llm, stub_geocoder):
     graph = build_graph()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
     state = await graph.ainvoke(
         {"original_request": QUESTION, "clarification_rounds": 0}, config=config
     )
-    assert state["__interrupt__"][0].value["pending_slots"] == ["target"]
+    assert not state.get("__interrupt__")
+    assert state["contract"].slots["target"].value == "Officially confirmed fire perimeters"
 
 
 async def test_ungroundable_location_does_block(stub_llm, monkeypatch):
@@ -266,7 +250,10 @@ async def test_ungroundable_location_does_block(stub_llm, monkeypatch):
     graph = build_graph()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
     state = await graph.ainvoke(
-        {"original_request": "Will the wildfire affect my house?", "clarification_rounds": 0},
+        {
+            "original_request": "Will the wildfire affect my house?",
+            "clarification_rounds": 0,
+        },
         config=config,
     )
     assert "location" in state["__interrupt__"][0].value["pending_slots"]
@@ -275,8 +262,9 @@ async def test_ungroundable_location_does_block(stub_llm, monkeypatch):
 async def test_hallucinated_enums_are_dropped(stub_llm, stub_geocoder):
     graph = build_graph()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    await graph.ainvoke({"original_request": QUESTION, "clarification_rounds": 0}, config=config)
-    state = await graph.ainvoke(Command(resume="both, 10 km"), config=config)
+    state = await graph.ainvoke(
+        {"original_request": QUESTION, "clarification_rounds": 0}, config=config
+    )
     contract = state["contract"]
 
     assert contract.hazard_objects == ["active_fire"]
@@ -288,8 +276,9 @@ async def test_missing_baseline_slot_is_backfilled_with_default(stub_llm, stub_g
     default recorded in assumptions."""
     graph = build_graph()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    await graph.ainvoke({"original_request": QUESTION, "clarification_rounds": 0}, config=config)
-    state = await graph.ainvoke(Command(resume="both, 10 km"), config=config)
+    state = await graph.ainvoke(
+        {"original_request": QUESTION, "clarification_rounds": 0}, config=config
+    )
     contract = state["contract"]
 
     assert contract.slots["requested_output"].value == "map"
@@ -297,41 +286,179 @@ async def test_missing_baseline_slot_is_backfilled_with_default(stub_llm, stub_g
     assert any("requested_output" in a for a in contract.assumptions)
 
 
-async def test_user_declining_stops_the_questioning(stub_llm, stub_geocoder, monkeypatch):
-    """When the user says "you decide", stop asking and use defaults - do not
-    keep interrogating until the round limit."""
-    monkeypatch.setattr(
-        "wildfire_agent.graph.nodes.structured",
-        lambda schema, **_k: _StubRunnable(
-            {
-                RequirementUnderstanding: _understanding(),
-                CompiledTask: _compiled(),
-                ClarificationBatch: _batch(),
-                ClarificationInterpretation: ClarificationInterpretation(user_declined=True),
-            }[schema]
-        ),
-    )
+async def test_backend_default_avoids_a_source_question(stub_llm, stub_geocoder):
     graph = build_graph()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    await graph.ainvoke({"original_request": QUESTION, "clarification_rounds": 0}, config=config)
-    state = await graph.ainvoke(Command(resume="you decide"), config=config)
+    state = await graph.ainvoke(
+        {"original_request": QUESTION, "clarification_rounds": 0}, config=config
+    )
 
     assert not state.get("__interrupt__")
     contract = state["contract"]
-    assert contract.clarification_rounds == 1
+    assert contract.clarification_rounds == 0
     assert contract.ready_for_planning
-    # target fell back to a default, and that has to stay visible
-    assert contract.slots["target"].source == "default"
-    assert any("target" in a for a in contract.assumptions)
+    assert contract.slots["target"].source == "agent_inferred"
 
 
 async def test_expertise_override_wins_over_inference(stub_llm, stub_geocoder):
     """Demo highlight: the manual picker in the UI outranks the inference."""
     graph = build_graph()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    await graph.ainvoke(
-        {"original_request": QUESTION, "clarification_rounds": 0, "expertise_override": "expert"},
+    state = await graph.ainvoke(
+        {
+            "original_request": QUESTION,
+            "clarification_rounds": 0,
+            "expertise_override": "expert",
+        },
         config=config,
     )
-    state = await graph.ainvoke(Command(resume="both, 10 km"), config=config)
     assert state["contract"].expertise == "expert"
+
+
+def test_followup_nearby_inherits_previous_resolved_location():
+    previous = SpatialSlot(
+        value="Santa Barbara, California",
+        raw="Santa Barbara, California",
+        resolved=ResolvedLocation(
+            display_name="Santa Barbara, California, USA",
+            center=(-119.7027, 34.4221),
+            buffer_km=25,
+            bbox=(-119.98, 34.19, -119.43, 34.65),
+            geocoder="nominatim",
+        ),
+    )
+    contract = AnalysisContract(
+        original_request="is there fire nearby",
+        slots={
+            "location": SpatialSlot(
+                value="nearby",
+                raw="nearby",
+                is_blocking=True,
+            )
+        },
+    )
+
+    assert _inherit_prior_location(contract, previous, inherit_subject=True) is True
+    spatial = contract.spatial()
+    assert spatial is not None
+    assert spatial.value == "Santa Barbara, California"
+    assert spatial.resolved is not None
+    assert spatial.resolved.center == (-119.7027, 34.4221)
+    assert not spatial.needs_clarification
+
+
+def test_followup_explicit_place_overrides_previous_location():
+    previous = SpatialSlot(
+        value="Santa Barbara, California",
+        resolved=ResolvedLocation(center=(-119.7027, 34.4221)),
+    )
+    contract = AnalysisContract(
+        original_request="is there fire near San Diego",
+        slots={
+            "location": SpatialSlot(
+                value="near San Diego",
+                raw="near San Diego",
+                is_blocking=True,
+            )
+        },
+    )
+
+    assert _inherit_prior_location(contract, previous, inherit_subject=False) is False
+    spatial = contract.spatial()
+    assert spatial is not None
+    assert spatial.value == "near San Diego"
+
+
+def test_fire_burned_area_reference_inherits_previous_event_location():
+    previous = SpatialSlot(
+        value="Bobcat Fire",
+        resolved=ResolvedLocation(
+            display_name="Bobcat Fire",
+            center=(-117.93, 34.33),
+            bbox=(-118.22, 34.01, -117.74, 34.62),
+        ),
+    )
+    contract = AnalysisContract(
+        original_request="Which cities intersected this fire's mapped burned area?",
+        slots={
+            "location": SpatialSlot(
+                value="this fire's mapped burned area",
+                raw="this fire's mapped burned area",
+                is_blocking=True,
+            )
+        },
+    )
+
+    assert _inherit_prior_location(contract, previous, inherit_subject=True) is True
+    spatial = contract.spatial()
+    assert spatial is not None
+    assert spatial.value == "Bobcat Fire"
+    assert spatial.resolved is not None
+    assert spatial.resolved.center == (-117.93, 34.33)
+
+
+def test_fire_followup_inherits_historical_date_and_evidence_family():
+    contract = AnalysisContract(
+        original_request="Which cities intersected this fire's mapped burned area?",
+        slots={
+            "time_horizon": ScalarSlot(value="now", source="default"),
+            "target": ScalarSlot(value="Officially confirmed fire perimeters"),
+        },
+        assumptions=[
+            "No time window was specified, so the analysis defaults to now.",
+            "Fire evidence selected automatically: Officially confirmed fire perimeters.",
+        ],
+    )
+
+    assert (
+        _inherit_prior_fire_context(
+            contract,
+            "24461771",
+            "2020-09-18",
+            inherit_subject=True,
+            inherit_time=True,
+        )
+        is True
+    )
+    time_horizon = contract.slots["time_horizon"]
+    target = contract.slots["target"]
+    assert time_horizon.value == "2020-09-18"
+    assert time_horizon.source == "agent_inferred"
+    assert target.value == "TS-SatFire active fire + burned area historical labels"
+    assert target.source == "agent_inferred"
+    assert all("defaults to now" not in item for item in contract.assumptions)
+    assert any("event 24461771, time 2020-09-18" in item for item in contract.assumptions)
+
+
+def test_fire_followup_preserves_model_compiled_time_range():
+    contract = AnalysisContract(
+        original_request=(
+            "For Bobcat Fire, compare NDVI from 2020-09-04 with 2020-09-27 "
+            "inside the mapped burned area."
+        ),
+        slots={
+            "time_horizon": ScalarSlot(
+                value="2020-09-04 to 2020-09-27",
+                source="user_stated",
+                confidence=0.99,
+            ),
+            "target": ScalarSlot(value="Vegetation condition (NDVI)"),
+        },
+    )
+
+    assert (
+        _inherit_prior_fire_context(
+            contract,
+            "24461771",
+            "2020-09-18",
+            inherit_subject=True,
+            inherit_time=True,
+        )
+        is True
+    )
+    time_horizon = contract.slots["time_horizon"]
+    assert time_horizon.value == "2020-09-04 to 2020-09-27"
+    assert time_horizon.source == "user_stated"
+    assert any(
+        "event 24461771, time 2020-09-04 to 2020-09-27" in item for item in contract.assumptions
+    )

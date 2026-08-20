@@ -37,7 +37,25 @@ def test_every_emitted_event_is_declared():
     assert not undeclared, f"api.py emits undeclared events: {sorted(undeclared)}"
 
 
+def _registry_event_names() -> set[str]:
+    """Events the analysis registry sends on the orchestrator's behalf.
+
+    `api.py` emits these as `match.spec.event`, so the literal never appears
+    there. The registry is where they are declared, and where this check has to
+    look for them to stay meaningful.
+    """
+    from wildfire_agent.analyses import SPECS
+
+    return {spec.event for spec in SPECS}
+
+
 def test_every_declared_event_is_actually_emitted():
     """A declared-but-dead event is documentation for behaviour that does not exist."""
-    unused = set(EVENT_NAMES) - _emitted_event_names()
-    assert not unused, f"events.py declares events api.py never sends: {sorted(unused)}"
+    unused = set(EVENT_NAMES) - _emitted_event_names() - _registry_event_names()
+    assert not unused, f"events.py declares events nothing ever sends: {sorted(unused)}"
+
+
+def test_every_registry_event_is_declared():
+    """An analysis cannot invent an event name the wire contract does not know."""
+    undeclared = _registry_event_names() - set(EVENT_NAMES)
+    assert not undeclared, f"the analysis registry uses undeclared events: {sorted(undeclared)}"

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     geocoder_user_agent: str = "wildfire-analyst-agent/0.1 (competition demo)"
     geocoder_timeout_s: float = 10.0
 
+    # ── Local-data recognition demo ─────────────────────────────────
+    #: One allow-listed root. The model sees only metadata with relative paths;
+    #: trusted code performs the scan and validates every selected dataset id.
+    local_data_root: Path = REPO_ROOT / "backend" / "data"
+
     # ── Service ─────────────────────────────────────────────────────
     api_host: str = "127.0.0.1"
     api_port: int = 8000
@@ -52,6 +57,11 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def resolved_local_data_root(self) -> Path:
+        path = self.local_data_root.expanduser()
+        return path.resolve() if path.is_absolute() else (REPO_ROOT / path).resolve()
 
 
 settings = Settings()

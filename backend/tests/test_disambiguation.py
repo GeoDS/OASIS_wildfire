@@ -1,11 +1,4 @@
-"""Non-interchangeable data families must force a question.
-
-This is the single most important moment in the demo, and it is deliberately
-*not* left to the prompt: gpt-4.1-mini read the instruction and defaulted the
-slot anyway, silently choosing between "officially confirmed fire perimeters"
-and "satellite thermal detections" - two things that are not the same fact.
-The rule lives in the domain model and is enforced in code.
-"""
+"""Backend-owned evidence selection and the remaining blocking choices."""
 
 from wildfire_agent.contract import AnalysisContract, ScalarSlot
 from wildfire_agent.graph.nodes import enforce_family_disambiguation, names_a_family
@@ -51,18 +44,34 @@ class TestNamesAFamily:
 
 
 class TestEnforcement:
-    def test_ambiguous_target_is_forced_blocking_and_cleared(self):
+    def test_generic_fire_question_gets_conservative_backend_default(self):
         contract = _contract("active fires")
         enforce_family_disambiguation(contract)
 
         target = contract.slots["target"]
-        assert target.is_blocking
-        # The vague value must be cleared, not kept: leaving it in place is
-        # exactly the silent wrong pick we are guarding against.
-        assert target.value is None
-        assert "not semantically interchangeable" in (target.blocking_reason or "")
-        assert contract.pending_slots == ["target"]
-        assert not contract.ready_for_planning
+        assert not target.is_blocking
+        assert target.value == "Officially confirmed fire perimeters"
+        assert target.source == "agent_inferred"
+        assert contract.ready_for_planning
+        assert "Fire evidence selected automatically" in contract.assumptions[0]
+
+    def test_satellite_wording_is_selected_without_a_question(self):
+        contract = _contract(None)
+        contract.original_request = "Show hotspot activity for the Bobcat Fire"
+        enforce_family_disambiguation(contract)
+        assert contract.slots["target"].value == "Satellite thermal detections"
+        assert not contract.slots["target"].is_blocking
+
+    def test_local_event_uses_ts_satfire_labels_in_the_contract(self):
+        contract = _contract(None)
+        contract.original_request = "Show the lifecycle of the Bobcat Fire on 2020-09-18"
+        enforce_family_disambiguation(contract)
+        assert (
+            contract.slots["target"].value
+            == "TS-SatFire active fire + burned area historical labels"
+        )
+        assert contract.slots["target"].source == "agent_inferred"
+        assert not contract.slots["target"].is_blocking
 
     def test_named_family_passes_through(self):
         contract = _contract("official_fire_perimeters + satellite_hotspots")
@@ -88,14 +97,14 @@ class TestEnforcement:
             slots={},
         )
         enforce_family_disambiguation(contract)
-        assert contract.slots["target"].is_blocking
+        assert contract.slots["target"].value == "Officially confirmed fire perimeters"
+        assert not contract.slots["target"].is_blocking
 
-    def test_smoke_also_carries_a_family_choice(self):
-        """Satellite plume extent and ground monitors answer different questions:
-        where smoke is overhead vs what people actually breathe."""
+    def test_smoke_family_is_also_selected_by_backend(self):
         contract = _contract("smoke", hazards=["smoke_plume"])
         enforce_family_disambiguation(contract)
-        assert contract.slots["target"].is_blocking
+        assert not contract.slots["target"].is_blocking
+        assert contract.slots["target"].value == "Satellite plume extent"
 
         contract = _contract("ground monitor readings", hazards=["smoke_plume"])
         enforce_family_disambiguation(contract)

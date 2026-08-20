@@ -47,7 +47,7 @@ def _get(url: str, params: dict | None = None, timeout: int = 90) -> bytes:
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
 
@@ -135,7 +135,9 @@ def fetch_official_perimeter() -> None:
 # 2. Satellite thermal detections - NOAA HMS daily archive
 # ══════════════════════════════════════════════════════════════════
 
-HMS_URL = "https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Fire_Points/Text/{y}/{m}/hms_fire{d}.txt"
+HMS_URL = (
+    "https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Fire_Points/Text/{y}/{m}/hms_fire{d}.txt"
+)
 
 
 def fetch_satellite_hotspots() -> None:

@@ -26,6 +26,7 @@ Provenance = Literal["user_stated", "agent_inferred", "default"]
 # Slots
 # ══════════════════════════════════════════════════════════════════
 
+
 class SlotBase(BaseModel):
     """A single information slot.
 
@@ -77,9 +78,7 @@ class ResolvedLocation(BaseModel):
     bbox: tuple[float, float, float, float] | None = Field(
         None, description="[west, south, east, north]"
     )
-    geocoder: str | None = Field(
-        None, description="nominatim / user_provided / fallback_gazetteer"
-    )
+    geocoder: str | None = Field(None, description="nominatim / user_provided / fallback_gazetteer")
     confirmed_by_user: bool = False
 
     alternatives: list[str] = Field(
@@ -129,6 +128,7 @@ Slot = Annotated[ScalarSlot | SpatialSlot, Field(discriminator="kind")]
 # Clarification
 # ══════════════════════════════════════════════════════════════════
 
+
 class ClarificationOption(BaseModel):
     """A concrete choice. The `general` expertise level must offer options
     rather than open questions - see the register table in `docs/01-taxonomy.md`."""
@@ -154,6 +154,7 @@ class ClarificationQuestion(BaseModel):
 # Analysis Contract
 # ══════════════════════════════════════════════════════════════════
 
+
 class AnalysisContract(BaseModel):
     """The structured task specification handed to the Planning Agent.
 
@@ -169,6 +170,13 @@ class AnalysisContract(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     original_request: str = Field(description="The user's original wording, kept for audit")
+    resolved_request: str | None = Field(
+        None,
+        description=(
+            "Conversation-aware standalone wording used by planners. The original wording "
+            "remains unchanged for audit."
+        ),
+    )
     restatement: str | None = Field(
         None, description="One-sentence restatement so the user can confirm the agent got it"
     )
@@ -215,6 +223,10 @@ class AnalysisContract(BaseModel):
     def spatial(self) -> SpatialSlot | None:
         slot = self.slots.get("location")
         return slot if isinstance(slot, SpatialSlot) else None
+
+    def analysis_request(self) -> str:
+        """Return the context-resolved wording used for routing and execution."""
+        return self.resolved_request or self.original_request
 
     def filled_ratio(self) -> float:
         """Drives the progress bar in the UI."""
