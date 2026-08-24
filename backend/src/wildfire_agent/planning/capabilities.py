@@ -15,6 +15,7 @@ cashes in the question Task 1 insisted on asking.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -42,6 +43,11 @@ class Capability:
     geometry_type: Literal["Point", "Polygon", "LineString"]
     #: Path relative to `DATA_ROOT`.
     path: str
+    #: Which of the hazard object's `required_variables` this layer actually
+    #: carries. Declared from the fields in the file, not from the layer's name:
+    #: a perimeter layer without a date does not supply a detection time, and
+    #: saying otherwise turns a real gap into a silent one.
+    supplies: tuple[str, ...]
     #: One line the renderer must surface with the layer. Not optional: a layer
     #: shown without its caveat is how a satellite heat pixel becomes "a fire".
     caveat: str
@@ -75,6 +81,9 @@ CAPABILITIES: dict[str, Capability] = {
             temporality="snapshot_current",
             geometry_type="Polygon",
             path="altadena/official_fire_perimeters.geojson",
+            # Fields are incident_name, status, type. The as-of date lives in the
+            # caveat, not in the data, so no detection time is carried.
+            supplies=("fire perimeter",),
             caveat=(
                 "Agency-verified perimeter for the Eaton Fire as of 21 January 2025. "
                 "Authoritative, but published with a lag - it is not live conditions."
@@ -88,6 +97,9 @@ CAPABILITIES: dict[str, Capability] = {
             temporality="snapshot_current",
             geometry_type="Point",
             path="altadena/satellite_hotspots.geojson",
+            # acq_date gives the detection time. frp_mw is radiative power -
+            # intensity, not confidence - so no confidence is claimed.
+            supplies=("hotspot location", "detection time"),
             caveat=(
                 "Each point is a thermal anomaly, not a confirmed wildfire. GOES pixels "
                 "are coarse, and agricultural or industrial heat produces the same "
@@ -106,6 +118,9 @@ CAPABILITIES: dict[str, Capability] = {
             temporality="historical",
             geometry_type="Polygon",
             path="altadena/historical_fire_perimeters.geojson",
+            # acres gives the size. fire_year is a year of record, not a moment
+            # of detection, so it is not offered as a detection time.
+            supplies=("fire perimeter", "fire size"),
             caveat=(
                 "Perimeters only, with no burn severity. The national layer lags by "
                 "about a year, so the Eaton Fire itself is not in it."
@@ -129,6 +144,32 @@ def load_layer(capability_id: str) -> dict:
 
 def capabilities_for(hazard_object: str) -> list[Capability]:
     return [c for c in CAPABILITIES.values() if c.hazard_object == hazard_object]
+
+
+def missing_variables(
+    hazard_object: str,
+    capability_ids: Iterable[str] | None = None,
+) -> tuple[str, ...]:
+    """Required variables for a hazard object that nothing supplies.
+
+    `capability_ids` scopes the question to one plan's chosen layers; omitting it
+    asks what this deployment could supply at best. The distinction matters: a
+    variable the deployment has but this plan did not select is a planning gap,
+    while one nothing has at all is a data gap that only an outside source can
+    close.
+    """
+    from ..taxonomy import HAZARD_OBJECTS
+
+    hazard = HAZARD_OBJECTS.get(hazard_object)
+    if hazard is None:
+        return ()
+    if capability_ids is None:
+        pool = capabilities_for(hazard_object)
+    else:
+        wanted = set(capability_ids)
+        pool = [c for c in capabilities_for(hazard_object) if c.id in wanted]
+    supplied = {variable for capability in pool for variable in capability.supplies}
+    return tuple(v for v in hazard.required_variables if v not in supplied)
 
 
 def available_hazard_objects() -> set[str]:

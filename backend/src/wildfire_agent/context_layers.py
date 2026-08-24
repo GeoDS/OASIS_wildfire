@@ -29,21 +29,12 @@ class PlaceBoundary:
     center: tuple[float, float]
     bbox: tuple[float, float, float, float]
     geometry: dict[str, Any]
+    #: Official land area from TIGER's own `ALAND`, in km². Taken from the
+    #: attribute rather than computed from the ring, because the shapefile does
+    #: not guarantee a winding order and a signed shoelace would silently treat
+    #: a hole as extra area.
+    land_area_km2: float
 
-
-_COMMUNITIES: tuple[tuple[str, float, float], ...] = (
-    ("Altadena", -118.1312, 34.1897),
-    ("Arcadia", -118.0353, 34.1397),
-    ("Azusa", -117.9076, 34.1336),
-    ("Bradbury", -117.9709, 34.1469),
-    ("Duarte", -117.9773, 34.1395),
-    ("Glendora", -117.8653, 34.1361),
-    ("Monrovia", -118.0019, 34.1443),
-    ("Pasadena", -118.1445, 34.1478),
-    ("San Dimas", -117.8067, 34.1067),
-    ("Sierra Madre", -118.0528, 34.1617),
-    ("Wrightwood", -117.6334, 34.3608),
-)
 
 
 def _normalise_place_name(value: str) -> str:
@@ -80,6 +71,7 @@ def california_places() -> tuple[PlaceBoundary, ...]:
                     name=str(record.get("NAME") or ""),
                     legal_name=str(record.get("NAMELSAD") or record.get("NAME") or ""),
                     geoid=str(record.get("GEOID") or ""),
+                    land_area_km2=float(record.get("ALAND") or 0.0) / 1_000_000,
                     class_code=str(record.get("CLASSFP") or ""),
                     center=(
                         float(record.get("INTPTLON") or 0),
@@ -123,7 +115,7 @@ def city_subject_layer(contract: AnalysisContract) -> LayerResult | None:
     return LayerResult(
         capability_id="subject_city_boundary",
         title=f"{place.name} boundary",
-        hazard_object="population_exposure",
+        hazard_object="exposure",
         family=None,
         geometry_type="Polygon",
         caveat=(
@@ -156,43 +148,6 @@ def _distance_km(a: tuple[float, float], b: tuple[float, float]) -> float:
         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
     )
     return 6371.0088 * 2 * math.asin(math.sqrt(h))
-
-
-def nearby_communities_layer(contract: AnalysisContract, fire_name: str) -> LayerResult | None:
-    spatial = contract.spatial()
-    resolved = spatial.resolved if spatial else None
-    if not resolved or not resolved.center:
-        return None
-    radius = resolved.buffer_km or 25.0
-    features = []
-    for name, lon, lat in _COMMUNITIES:
-        distance = _distance_km(resolved.center, (lon, lat))
-        if distance <= radius:
-            features.append(
-                {
-                    "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                    "properties": {
-                        "name": name,
-                        "distanceKm": round(distance, 1),
-                        "relation": "inside proximity screen",
-                    },
-                }
-            )
-    return LayerResult(
-        capability_id="auto_fire_nearby_communities",
-        title=f"Communities near {fire_name}",
-        hazard_object="population_exposure",
-        family=None,
-        geometry_type="Point",
-        caveat=(
-            "Proximity screen only: appearing here does not prove that a community burned, "
-            "was evacuated, or experienced harmful smoke."
-        ),
-        feature_count=len(features),
-        source="FireScope Southern California community gazetteer",
-        geojson={"type": "FeatureCollection", "features": features},
-    )
 
 
 def _coordinates(value: Any):
@@ -383,7 +338,7 @@ def communities_intersecting_fire(fire_subject: LayerResult, fire_name: str) -> 
     return LayerResult(
         capability_id="fire_intersecting_place_boundaries",
         title=f"Places intersecting {fire_name}",
-        hazard_object="population_exposure",
+        hazard_object="exposure",
         family=None,
         geometry_type="Polygon",
         caveat=(
@@ -419,6 +374,7 @@ def _communities_intersecting_label_points(
     day: str,
     *,
     kind: str,
+    pixel_area_km2: float = 0.0,
 ) -> LayerResult | None:
     """Intersect one lifecycle label with Census places and retain pixel counts."""
     if not points:
@@ -485,6 +441,18 @@ def _communities_intersecting_label_points(
                     "geoid": place.geoid,
                     "relation": relation,
                     "labelPixelCount": len(matching_points),
+                    "labelAreaKm2": round(len(matching_points) * pixel_area_km2, 2),
+                    "placeAreaKm2": round(place.land_area_km2, 2),
+                    # Share of the place's own land area, which is the figure that
+                    # keeps "this city was touched" from reading as "this city burned".
+                    "labelSharePercent": (
+                        round(
+                            len(matching_points) * pixel_area_km2 / place.land_area_km2 * 100,
+                            1,
+                        )
+                        if pixel_area_km2 and place.land_area_km2
+                        else None
+                    ),
                     "date": day,
                     "geometryRole": geometry_role,
                 },
@@ -493,7 +461,7 @@ def _communities_intersecting_label_points(
     return LayerResult(
         capability_id=capability_id,
         title=title,
-        hazard_object="population_exposure",
+        hazard_object="exposure",
         family=None,
         geometry_type="Polygon",
         caveat=caveat,
@@ -514,6 +482,8 @@ def _communities_intersecting_label_points(
             popup_fields=[
                 PopupField(key="legalName", label="Place"),
                 PopupField(key="labelPixelCount", label=pixel_label),
+                PopupField(key="labelSharePercent", label="Share of place area (%)"),
+                PopupField(key="labelAreaKm2", label="Area within place (km²)"),
                 PopupField(key="relation", label="Spatial relationship"),
                 PopupField(key="date", label=date_label),
             ],
@@ -527,6 +497,8 @@ def communities_intersecting_burned_area(
     burned_points: tuple[tuple[float, float], ...],
     fire_name: str,
     day: str,
+    *,
+    pixel_area_km2: float = 0.0,
 ) -> LayerResult | None:
     """Intersect cumulative TS-SatFire BA pixel centers with Census places."""
     return _communities_intersecting_label_points(
@@ -534,6 +506,7 @@ def communities_intersecting_burned_area(
         fire_name,
         day,
         kind="burned_area",
+        pixel_area_km2=pixel_area_km2,
     )
 
 
@@ -541,6 +514,8 @@ def communities_intersecting_active_fire(
     active_points: tuple[tuple[float, float], ...],
     fire_name: str,
     day: str,
+    *,
+    pixel_area_km2: float = 0.0,
 ) -> LayerResult | None:
     """Intersect same-day TS-SatFire AF pixel centers with Census places."""
     return _communities_intersecting_label_points(
@@ -548,6 +523,7 @@ def communities_intersecting_active_fire(
         fire_name,
         day,
         kind="active_fire",
+        pixel_area_km2=pixel_area_km2,
     )
 
 
@@ -587,7 +563,7 @@ def communities_nearest_burned_area(
     return LayerResult(
         capability_id="burned_area_nearest_place_reference_points",
         title=f"Places closest to {fire_name} mapped BA",
-        hazard_object="population_exposure",
+        hazard_object="exposure",
         family=None,
         geometry_type="Point",
         caveat=(
@@ -697,7 +673,7 @@ def communities_nearest_fire(
     return LayerResult(
         capability_id="fire_nearest_place_reference_points",
         title=f"Places closest to {fire_name}",
-        hazard_object="population_exposure",
+        hazard_object="exposure",
         family=None,
         geometry_type="Point",
         caveat=(
@@ -742,15 +718,17 @@ def city_context_status(
     weather = (weather_feature or {}).get("properties") or {}
     if perimeter_count:
         assessment = (
-            f"{city_name} may currently be directly affected by an active fire. "
-            "An agency-mapped fire perimeter overlaps the city boundary."
+            f"An agency-mapped fire perimeter currently overlaps {city_name}. "
+            "The overlap is with the city boundary, which is not the same as "
+            "any particular address being affected."
         )
         evidence = "elevated"
     else:
+        # Three hedges in three sentences was the old wording, and the narrator
+        # mirrored its shape. One statement, one caveat.
         assessment = (
-            f"{city_name} does not appear to be directly affected by an active fire right now. "
-            "No current agency fire perimeter overlaps the city boundary. "
-            "Conditions can change, so this is not a forecast."
+            f"No agency-mapped fire perimeter currently overlaps {city_name}. "
+            "That is the position as last published, not a forecast."
         )
         evidence = "low"
     details = [f"Current fire perimeters in scope: {perimeter_count}."]

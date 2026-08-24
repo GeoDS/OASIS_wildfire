@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from wildfire_agent import narration
 from wildfire_agent.narration import (
     NarrationRejected,
     _figures,
@@ -83,3 +84,73 @@ def test_one_bad_claim_rejects_the_whole_draft():
     with pytest.raises(NarrationRejected) as excinfo:
         verify_layer_claims(["burned area", "FirePred"], DISPLAYED)
     assert "FirePred" in str(excinfo.value)
+
+
+class TestAnAuthorisedFigureIsNotTheNarratorsToDrop:
+    """Trimming is the narrator's job - except for figures a person was stopped
+    and asked to authorise a network fetch for. Dropping one of those returns an
+    answer the user cannot tell apart from the one they'd have got by refusing,
+    which is how consent gets spent for nothing."""
+
+    def test_a_draft_that_keeps_them_passes(self):
+        text = "Monrovia has 37,571 residents and Duarte 22,184."
+        assert narration.verify_preserved(text, ("37,571", "22,184")) is text
+
+    def test_a_draft_that_uses_none_of_them_is_rejected(self):
+        with pytest.raises(narration.NarrationRejected):
+            narration.verify_preserved("The burned area reached three cities.", ("37,571",))
+
+    def test_answering_with_one_fetched_figure_is_enough(self):
+        """The rule is that an approved fetch must visibly change the answer -
+        not that every value it returned must appear in every reply.
+
+        Asked about income, the analyst writes about income. Demanding the
+        populations too rejected a sound answer and fell back to a paragraph
+        about which cities were reached, which is not what was asked."""
+        draft = "Median household income is Monrovia $108,295 and Duarte $95,536."
+        assert narration.verify_preserved(draft, ("37,571", "22,184", "108,295")) is draft
+
+    def test_separators_do_not_decide_it(self):
+        """1,116 and 1116 are the same quantity, as `verify_grounded` already treats them."""
+        assert narration.verify_preserved("37571 people", ("37,571",))
+
+    def test_nothing_was_authorised_so_nothing_is_required(self):
+        assert narration.verify_preserved("any wording at all", ()) == "any wording at all"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_drops_the_fetched_figures_falls_back(monkeypatch):
+    """The deterministic sentence carries them, so falling back is the answer
+    that honours the fetch rather than a failure to answer."""
+    monkeypatch.setattr(narration, "is_mock", lambda: False)
+
+    async def draft_without_them(_system, _human):
+        return "The burned area reached parts of Monrovia and Duarte."
+
+    monkeypatch.setattr(narration, "_draft", draft_without_them)
+    fallback = "Census population is Monrovia 37,571, Duarte 22,184."
+    said = await narration.narrate(
+        question="Which cities did it reach?",
+        facts={"message": fallback},
+        fallback=fallback,
+        preserve=("37,571", "22,184"),
+    )
+    assert said == fallback
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_keeps_them_is_used(monkeypatch):
+    monkeypatch.setattr(narration, "is_mock", lambda: False)
+
+    async def draft_with_them(_system, _human):
+        return "It reached Monrovia (37,571 residents) and Duarte (22,184)."
+
+    monkeypatch.setattr(narration, "_draft", draft_with_them)
+    fallback = "Census population is Monrovia 37,571, Duarte 22,184."
+    said = await narration.narrate(
+        question="Which cities did it reach?",
+        facts={"message": fallback},
+        fallback=fallback,
+        preserve=("37,571", "22,184"),
+    )
+    assert said.startswith("It reached Monrovia")

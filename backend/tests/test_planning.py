@@ -134,9 +134,23 @@ class TestProposalValidation:
         )
         plan = validate_proposal(contract, proposal)
 
-        unmet = {u.hazard_object for u in plan.unmet}
-        assert unmet == {"fire_spread", "fuel"}
-        assert all("capability is missing" in u.reason for u in plan.unmet)
+        # Two kinds of gap, and they are not the same statement. `fire_spread`
+        # and `fuel` have no capability at all; `active_fire` has one, but the
+        # single chosen perimeter layer carries only the perimeter itself.
+        by_object = {u.hazard_object: u for u in plan.unmet}
+        assert set(by_object) == {"active_fire", "fire_spread", "fuel"}
+
+        wholesale = by_object["fire_spread"]
+        assert wholesale.missing_variables == ()
+        assert "No data source in this deployment covers" in wholesale.reason
+
+        partial = by_object["active_fire"]
+        assert "detection confidence" in partial.missing_variables
+        assert "fire perimeter" not in partial.missing_variables
+        assert "do not carry" in partial.reason
+        # Whichever kind, every gap says what is absent rather than substituting.
+        assert all(u.reason for u in plan.unmet)
+        assert wholesale.fillable_externally is True
 
     def test_reading_note_reaches_the_notes(self):
         proposal = PlanProposal(
@@ -215,3 +229,49 @@ class TestShowcaseData:
         assert SHOWCASE_AREA["id"] == "altadena"
         lon, lat = SHOWCASE_AREA["center"]
         assert -119 < lon < -117 and 33 < lat < 35
+
+
+class TestVariableGaps:
+    """What a layer carries, and what nothing carries.
+
+    `supplies` is declared from the fields in each file rather than from the
+    layer's name. That is the whole point: a perimeter file with no date column
+    does not supply a detection time, and a registry that claimed otherwise
+    would turn a real gap into a silent one.
+    """
+
+    def test_a_gap_nothing_in_the_deployment_can_close(self):
+        from wildfire_agent.planning.capabilities import missing_variables
+
+        absent = missing_variables("active_fire")
+        # Every active-fire layer here is a perimeter or a thermal point. None
+        # carries a confidence value - frp_mw is radiative power, which is
+        # intensity, not confidence - so this gap needs an outside source.
+        assert "detection confidence" in absent
+
+    def test_the_deployment_covers_what_its_layers_between_them_carry(self):
+        from wildfire_agent.planning.capabilities import missing_variables
+
+        absent = missing_variables("active_fire")
+        for supplied in ("fire perimeter", "hotspot location", "detection time", "fire size"):
+            assert supplied not in absent
+
+    def test_a_plan_that_selects_one_layer_has_a_wider_gap_than_the_deployment(self):
+        """Choosing fewer layers is a planning gap, not a data gap.
+
+        The distinction decides what to do about it: fetch from outside, or pick
+        a layer already sitting in the registry.
+        """
+        from wildfire_agent.planning.capabilities import missing_variables
+
+        deployment_gap = set(missing_variables("active_fire"))
+        one_layer_gap = set(missing_variables("active_fire", ["official_fire_perimeters"]))
+
+        assert deployment_gap < one_layer_gap
+        assert "hotspot location" in one_layer_gap
+        assert "hotspot location" not in deployment_gap
+
+    def test_an_unknown_hazard_object_reports_no_gap_rather_than_raising(self):
+        from wildfire_agent.planning.capabilities import missing_variables
+
+        assert missing_variables("not_a_hazard_object") == ()

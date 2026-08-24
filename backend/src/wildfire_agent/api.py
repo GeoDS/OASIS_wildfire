@@ -52,18 +52,31 @@ from .contract import AnalysisContract
 from .conversation import (
     AnalysisRef,
     ConversationContext,
+    ConversationResolution,
     ConversationResolutionError,
     SubjectRef,
     TimeRef,
     resolve_turn,
+    sources_to_fetch,
+    variables_to_lead,
 )
+from .debris_flow import HAZARD_OBJECT as DEBRIS_HAZARD_OBJECT
+from .debris_flow import fetch as debris_flow_fetch
+from .debris_flow import offer as debris_flow_offer
 from .events import EventName
+from .exposure import (
+    FETCHED_PROPERTIES,
+    enrich_places_with_acs,
+    offer_for,
+    variables_present,
+)
 from .graph import build_graph
 from .graph.build import make_serde
 from .graph.state import STAGE_AGENTS, STAGE_LABELS
 from .llm import check_llm_ready, describe_llm, is_mock
 from .narration import discuss, narrate
 from .planning import CAPABILITIES, SHOWCASE_AREA, ExecutionPlan
+from .planning.capabilities import missing_variables
 from .planning.executor import clip_local_layer, validate_bbox
 from .planning.models import LayerResult, LayerVisualization, LegendStop, PopupField
 from .raster_layers import (
@@ -71,6 +84,7 @@ from .raster_layers import (
     RasterLayerError,
     active_fire_label_points,
     burned_area_label_points,
+    event_supports_burned_area,
     fire_event_catalog_payload,
     lifecycle_asset_path,
     plan_fire_raster,
@@ -106,6 +120,128 @@ logger = logging.getLogger(__name__)
 _checkpointer = MemorySaver(serde=make_serde())
 _graph = build_graph(_checkpointer)
 _sessions: set[str] = set()
+
+
+#: Short replies that plainly answer a yes/no without using either label.
+#: Anything outside these is treated as unclear rather than guessed at.
+_AFFIRMATIVE = frozenset(
+    {"yes", "y", "yeah", "yep", "ok", "okay", "sure", "go ahead", "do it", "please do", "fetch"}
+)
+_NEGATIVE = frozenset({"no", "n", "nope", "skip", "don't", "do not", "no thanks", "without it"})
+
+
+@dataclass
+class PendingFill:
+    """An external fetch offered to the user and awaiting their decision.
+
+    The graph parks its own interrupts in the checkpointer, but the fire
+    rendering runs after the graph has finished, so it cannot use `interrupt()`.
+    This is the same idea in the layer that owns the question: hold the offer,
+    ask, and act on the answer at the start of the next turn.
+    """
+
+    offer: dict[str, Any]
+    #: The layer the fill would enrich, so the answer acts on the right one.
+    capability_id: str
+    accept: str = "Fetch it"
+    decline: str = "Answer without it"
+
+    @property
+    def key(self) -> str:
+        """What the user's answer is an answer *about*.
+
+        The source, not the layer or the turn. "Fetch the Census figures" asked
+        again three turns later is the same question, and the user has already
+        answered it.
+        """
+        return str(self.offer.get("source_id") or self.capability_id)
+
+    def decide(self, text: str) -> bool | None:
+        """True to fetch, False to decline, None when the answer is not clear.
+
+        Picking an option in the UI *appends* it to the composer rather than
+        sending, and several answers join with "; ", so an exact match on the
+        label misses a reply that plainly said yes. Containment handles that.
+
+        The decline label is tested first on purpose: "Answer without it" names
+        the data too, and reading consent out of a refusal is the one mistake
+        this gate exists to prevent. An unclear answer returns None, because the
+        safe default for "did they agree" is to ask again, not to assume.
+        """
+        lowered = text.strip().casefold()
+        if not lowered:
+            return None
+        if self.decline.casefold() in lowered:
+            return False
+        if self.accept.casefold() in lowered:
+            return True
+        if lowered in _AFFIRMATIVE:
+            return True
+        if lowered in _NEGATIVE:
+            return False
+        return None
+
+    def as_clarification(self) -> dict[str, Any]:
+        closes = ", ".join(self.offer["closes"])
+        remaining = self.offer.get("remaining") or ()
+        preamble = (
+            f"To answer this I need {closes}, which no local layer carries. "
+            f"I can fetch it from {self.offer['source']} "
+            f"({self.offer['dataset']}, by {self.offer['geography']})."
+        )
+        if remaining:
+            preamble += f" This would still leave {', '.join(remaining)} unavailable."
+        return {
+            "type": "clarification",
+            "preamble": preamble,
+            "questions": [
+                {
+                    "slot": "external_data",
+                    "question": "Fetch this data?",
+                    "options": [
+                        {"label": self.accept, "value": self.accept, "implication": ""},
+                        {"label": self.decline, "value": self.decline, "implication": ""},
+                    ],
+                    "allow_free_text": False,
+                }
+            ],
+            "pending_slots": ["external_data"],
+        }
+
+
+@dataclass
+class FillDecisions:
+    """External fetches this session has already settled, by source.
+
+    Every render re-derives its gap from `missing_variables`, a static taxonomy
+    table. That table cannot see the values a previous fetch attached, nor the
+    answer the user already gave, so on its own it re-asks the same question on
+    every turn about the same fire. The decision is a property of the session,
+    and this is where it lives.
+
+    A refusal is remembered as firmly as an approval. Re-asking a "no" until it
+    becomes a "yes" is the same failure wearing the other answer.
+    """
+
+    _answers: dict[str, bool] = field(default_factory=dict)
+
+    def record(self, key: str, approved: bool) -> None:
+        self._answers[key] = approved
+
+    def settled(self, key: str) -> bool:
+        return key in self._answers
+
+    def approved(self, key: str) -> bool:
+        return self._answers.get(key, False)
+
+    def should_ask(self, key: str) -> bool:
+        return key not in self._answers
+
+
+#: Offers awaiting an answer, one per session.
+_pending_fills: dict[str, PendingFill] = {}
+#: Fetch decisions already made, one set per session.
+_fill_decisions: dict[str, FillDecisions] = {}
 _session_contexts: dict[str, ConversationContext] = {}
 
 
@@ -150,6 +286,27 @@ class FireLifecycleIn(BaseModel):
     day: str | None = None
 
 
+def _archive_summary() -> list[dict[str, Any]]:
+    """The local fire archive, small enough to ride every prompt.
+
+    Names, spans, and what each event can actually answer - not the raster
+    metadata. `burned_area` is read from the data, so an event that carries only
+    active-fire detections says so here rather than at the end of a failed
+    analysis.
+    """
+    payload = fire_event_catalog_payload()
+    return [
+        {
+            "name": (event["event_name"] or event["event_id"]).removesuffix(" area"),
+            "first_day": (event["dates"] or [None])[0],
+            "last_day": (event["dates"] or [None])[-1],
+            "burned_area": event["task_support"]["burned_area_mapping"],
+            "active_fire": event["task_support"]["active_fire_detection"],
+        }
+        for event in payload["events"]
+    ]
+
+
 def _remember_completed_analysis(
     session_id: str,
     user_text: str,
@@ -159,10 +316,13 @@ def _remember_completed_analysis(
     layer_ids: list[str],
     spatial_analysis: dict[str, Any] | None,
     result_facts: dict[str, Any] | None = None,
+    fetched: dict[str, Any] | None = None,
 ) -> None:
     """Commit one completed turn to structured analytical memory."""
     context = _session_contexts.setdefault(session_id, ConversationContext())
     context.last_result = result_facts
+    for source_id, payload in (fetched or {}).items():
+        context.remember_fetch(source_id, payload)
     if fire_plan and fire_plan.dataset.event_id:
         event_name = (fire_plan.dataset.event_name or fire_plan.dataset.event_id).removesuffix(
             " area"
@@ -555,13 +715,125 @@ def _normalise_incident_name(value: str) -> str:
     return " ".join(word for word in re.findall(r"[a-z0-9]+", value.lower()) if word not in ignored)
 
 
+def _asks_post_fire_risk_question(value: str) -> bool:
+    """A question about what follows the fire rather than about the fire.
+
+    Debris flow is the consequence a burned watershed carries into the next
+    rainy season, so "what should I watch now" is asking for a hazard nothing
+    in this deployment holds.
+    """
+    return bool(
+        re.search(
+            r"\b(?:debris flow|mudslide|mud flow|landslide|post[- ]?fire|"
+            r"watershed|runoff|rainy season|next winter)\b",
+            value,
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"\b(?:what(?:'s| is)? next|watch (?:out )?for|worry about|"
+            r"downstream|follow[- ]?on|come next|happens next)\b",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
+#: How a question names each fetched variable. Ordered most specific first, so
+#: "median household income" is not claimed by the looser household pattern.
+_ATTRIBUTE_QUERIES: tuple[tuple[str, str], ...] = (
+    (r"\b(?:income|earnings|salary|wages|earn|afford)\b", "medianHouseholdIncome"),
+    (r"\b(?:housing|houses|homes|dwellings?|units?)\b", "housingUnits"),
+    (r"\b(?:median age|age structure|how old)\b", "medianAge"),
+    (r"\b(?:elderly|seniors?|older adults?|living alone)\b", "seniorsLivingAlone"),
+    (r"\b(?:vehicles?|cars?|carless|without a car)\b", "householdsWithoutVehicle"),
+    (
+        # "household income" is one phrase naming income, not a count of
+        # households, and it reads earlier in the sentence than "income" does.
+        (
+            r"\b(?:population|residents?|inhabitants?|who lives|how many people|"
+            r"demographics?|households?(?!\s+income)|people live)\b"
+        ),
+        "population",
+    ),
+)
+
+
+def _subject_changed(resolution: ConversationResolution) -> bool:
+    """Whether this turn is about something other than the last one.
+
+    `relation` is deliberately not consulted. Reading `correction` as "changed"
+    is the obvious mistake and the wrong one: a correction can correct the date
+    and keep the fire - "no, I meant the 28th" - and wiping the map for that
+    throws away the thing the user is still looking at. `inherited_subject` is
+    the field that answers the question, and `resolve_turn` already forces it to
+    False on a new request, so that case falls out for free.
+    """
+    return not resolution.inherited_subject
+
+
+def _turn_payload(kind: str, *, subject_changed: bool = False) -> dict[str, Any]:
+    """The `turn` event, which is the first event of every turn.
+
+    Carries whether the map is about to be replaced rather than refreshed, so
+    the frontend can clear a stale place immediately instead of holding it until
+    the first new layer arrives seconds later. See docs/05-turn-subject-change.md.
+    """
+    return {"kind": kind, "subject_changed": subject_changed}
+
+
+def _question_variables(session_id: str, contract: AnalysisContract) -> tuple[str, ...]:
+    """Which place variables this turn is about.
+
+    The resolver's answer, because it read the question with a model and knows
+    that "how wealthy" means income. `_asked_attributes` is the fallback for the
+    turns the resolver never sees - the first turn of a session, and mock mode -
+    and is no longer authoritative anywhere. A keyword gate deciding what the
+    narrator may know is what refused a wealth question while holding the figure.
+    """
+    context = _session_contexts.get(session_id)
+    if context is None or context.active_subject is None:
+        return _asked_attributes(contract.original_request) or _asked_attributes(
+            contract.analysis_request()
+        )
+    # The resolver ran. Naming nothing is an answer, not a gap to guess around.
+    return tuple(context.active_variables)
+
+
+def _asked_attributes(value: str) -> tuple[str, ...]:
+    """Which fetched variables this question actually asked for, in asked order.
+
+    The reply used to recite all seven in storage order, so a question about
+    income opened with a population count. Knowing which one was asked is what
+    lets the answer lead with it - and it is the same test that decides whether
+    the fill is worth stopping the user for at all, so the two cannot drift.
+    """
+    found: list[tuple[int, str]] = []
+    for pattern, prop in _ATTRIBUTE_QUERIES:
+        match = re.search(pattern, value, re.IGNORECASE)
+        if match and prop not in (p for _, p in found):
+            found.append((match.start(), prop))
+    return tuple(prop for _, prop in sorted(found))
+
+
+def _asks_place_attribute_question(value: str) -> bool:
+    """Whether the ACS fill could change this answer at all.
+
+    Weather and fire-proximity replies read no population, so offering there
+    spends the one question on something that cannot change a word.
+    """
+    return bool(_asked_attributes(value))
+
+
 def _asks_fire_community_question(value: str) -> bool:
     """Identify a fire-to-community spatial follow-up from user wording."""
     return bool(
         re.search(r"\b(?:cities|city|communities|community|towns?|places?)\b", value, re.IGNORECASE)
         and re.search(
+            # "which cities did it reach" and "what towns burned" are the two
+            # most natural phrasings and matched none of the original verbs.
             r"\b(?:intersect(?:ed|s|ing)?|closest|nearest|near|contain(?:ed|s|ing)?|"
-            r"have|with|affect(?:ed|s|ing)?|impact(?:ed|s|ing)?)\b",
+            r"have|with|affect(?:ed|s|ing)?|impact(?:ed|s|ing)?|reach(?:ed|es|ing)?|"
+            r"burn(?:ed|t|ing)?|hit|threaten(?:ed|s|ing)?|overlap(?:ped|s|ping)?)\b",
             value,
             re.IGNORECASE,
         )
@@ -589,11 +861,242 @@ def _human_date(value: str | None) -> str | None:
     return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
 
 
+def _place_population(layer: LayerResult | None) -> str:
+    """Residents per place, once an approved fetch has attached them.
+
+    Reported beside the area share and never multiplied by it: the share says
+    how much of a place's land is inside the footprint, and these people are
+    not distributed evenly across that land.
+    """
+    if not layer:
+        return ""
+    parts = []
+    total = 0
+    for feature in layer.geojson.get("features") or []:
+        properties = feature.get("properties") or {}
+        population = properties.get("population")
+        name = properties.get("name")
+        if population is None or not name:
+            continue
+        total += int(population)
+        parts.append(f"{name} {int(population):,}")
+    if not parts:
+        return ""
+    joined = ", ".join(parts)
+    return (
+        f" Census population is {joined}"
+        + (f", {total:,} in total" if len(parts) > 1 else "")
+        + ". These counts are for the whole place, not for the area that burned."
+    )
+
+
+def _place_shares(layer: LayerResult | None) -> str:
+    """Each place with the share of its own land inside the footprint, and the area.
+
+    The share alone is broken at both ends, because its denominator is the
+    place's own size. Los Angeles had 3.37 km2 inside the Woolsey footprint and
+    printed as "0%", while Hidden Hills' 0.70 km2 printed as "16%" - the larger
+    burn read as nothing. And a pixel whose centre falls inside counts whole, so
+    the sum can exceed the polygon: Pepperdine University printed as "100.2%",
+    which is not a possible share of anything.
+
+    The area survives both failures, so it travels with every share. A share
+    below half a percent is written "<1%" rather than rounded to a zero that
+    states nothing happened, and one above the whole place is capped at 100%
+    because the excess is the grid overshooting, not extra land.
+    """
+    if not layer:
+        return ""
+    parts = []
+    for feature in layer.geojson.get("features") or []:
+        properties = feature.get("properties") or {}
+        share = properties.get("labelSharePercent")
+        name = properties.get("name")
+        if share is None or not name:
+            continue
+        if share >= 100:
+            share_text = "100%"
+        elif share < 0.5:
+            share_text = "<1%"
+        else:
+            share_text = f"{share:.0f}%"
+        area = properties.get("labelAreaKm2")
+        parts.append(
+            f"{name} {share_text} ({area:.1f} km2)" if area is not None
+            else f"{name} {share_text}"
+        )
+    return ", ".join(parts)
+
+
+def _place_facts(
+    layer: LayerResult | None,
+    lead: tuple[str, ...] = (),
+    fetched_only: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Every attribute the answer's place layer carries, for the fact corpus.
+
+    The ACS fill attaches seven variables; the sentence prints one. The other
+    six went onto the map and nowhere else, so a later question about income was
+    answered "the analysis does not include ACS data" by a turn that was holding
+    the income figure. `narrate` and `discuss` both read the fact corpus, so
+    that is where a fetch has to land.
+
+    Passed through whole rather than whitelisted, deliberately: a variable added
+    to the fill should become answerable without a matching edit here, and the
+    properties are already written under readable names.
+
+    `lead` puts the variables the question asked for first.
+
+    `fetched_only` restricts which fetched variables travel at all, and is how
+    the narration facts are built. Handing the narrator all seven made it account
+    for all seven, per city, in one sentence - and prompt wording could not hold
+    that back. An answer's facts are what that answer needs; the full set goes to
+    session memory, where a later question still reaches it. Locally computed
+    properties - the name, the area share - are never restricted, because they
+    are what the sentence is about.
+    """
+    if not layer:
+        return []
+    ordered: list[dict[str, Any]] = []
+    for feature in layer.geojson.get("features") or []:
+        properties = feature.get("properties")
+        if not properties:
+            continue
+        if fetched_only is not None:
+            properties = {
+                key: value
+                for key, value in properties.items()
+                if key not in FETCHED_PROPERTIES or key in fetched_only
+            }
+        first = [key for key in lead if key in properties]
+        ordered.append(
+            {key: properties[key] for key in first + [k for k in properties if k not in first]}
+        )
+    return ordered
+
+
+def _authorised_figures(
+    layer: LayerResult | None, only: tuple[str, ...] | None = None
+) -> tuple[str, ...]:
+    """The fetched values an approved fill put on the layer, as a reply spells them.
+
+    Every property the fill writes, not only the one the sentence prints. Asked
+    about income, an analyst answers with income; when population was the only
+    thing that counted, that reply satisfied nothing and was thrown away for a
+    fallback about which cities were reached.
+
+    Locally computed properties - the area share, the pixel count - are excluded
+    on purpose. They are present whether or not anyone fetched anything, so
+    accepting them would let a reply that fetched nothing pass as one that did.
+
+    `only` narrows this to the variables the answer's facts actually carry.
+    Demanding a figure that was trimmed out of those facts is unsatisfiable, and
+    the reply it rejects is replaced by the template - which is how a sound
+    answer became a recital again.
+    """
+    if not layer:
+        return ()
+    wanted = FETCHED_PROPERTIES if only is None else only
+    figures: list[str] = []
+    for feature in layer.geojson.get("features") or []:
+        properties = feature.get("properties") or {}
+        for name in wanted:
+            value = properties.get(name)
+            if value is None:
+                continue
+            figures.append(f"{value:,}" if isinstance(value, int) else f"{value:,.1f}")
+    return tuple(dict.fromkeys(figures))
+
+
+def _debris_facts(
+    fire_name: str,
+    *,
+    drawn: int,
+    truncated: bool,
+    source: str,
+    remaining: tuple[str, ...],
+) -> dict[str, Any]:
+    """What an approved debris-flow fetch put on the map, and how much of it.
+
+    The county publishes 13,954 hazard polygons for one fire in this archive and
+    the fetch is capped well below that. Reporting the drawn count as
+    `hazard_areas` let it be stated as how many exist. What was drawn and how
+    many there are are different figures, and only one of them was measured.
+    """
+    facts: dict[str, Any] = {
+        "hazard_areas_drawn": drawn,
+        "complete": not truncated,
+        "burn_scar": fire_name,
+        "source": source,
+        "still_missing": list(remaining),
+        "meaning": (
+            "Modelled areas where debris flow is possible below this burn scar, "
+            "published for planning. Not a forecast of any storm, and not a record "
+            "that a debris flow has occurred."
+        ),
+    }
+    if truncated:
+        facts["coverage"] = (
+            f"{drawn:,} polygons were drawn, which is the fetch limit and not the total "
+            "the service holds for this burn scar. Treat the map as a sample of the "
+            "hazard areas, not an inventory of them."
+        )
+    return facts
+
+
+def _fire_record_message(
+    fire_name: str,
+    day: str,
+    active_pixels: int,
+    cumulative_burned_km2: float,
+    *,
+    burned_area_available: bool = True,
+) -> str:
+    """What the archive holds for one fire on one day.
+
+    An event with no burned-area labels reported "cumulative mapped BA is
+    approximately 0.0 km2", which reads as a quantity that was measured and came
+    to nothing. Two events in this subset have no such labels on any day: for
+    them the quantity does not exist, and saying so is the only honest form.
+
+    A genuine zero on an event that does map burned area - day one of a fire,
+    before anything accumulated - is still reported as zero, because there it is
+    a real measurement.
+    """
+    head = (
+        f"{fire_name}: TS-SatFire historical record for {day}. "
+        f"The selected day contains {active_pixels:,} AF label pixels"
+    )
+    if not burned_area_available:
+        return (
+            f"{head}. This event carries no burned-area labels, on this day or any "
+            "other, so no mapped burned area can be reported for it."
+        )
+    return f"{head}; cumulative mapped BA is approximately {cumulative_burned_km2:,.1f} km²."
+
+
+def _answer_reads_population(layer: LayerResult | None) -> bool:
+    """Whether the sentence about to be written would actually print the figures.
+
+    `_fire_community_message` reports population on one branch only: the
+    burned-area intersection. On every other branch the values are fetched,
+    attached, and never mentioned, so asking the user to authorise the call
+    spends their one question on something that cannot change a word they read.
+    """
+    return bool(
+        layer
+        and layer.feature_count
+        and layer.capability_id == "burned_area_intersecting_place_boundaries"
+    )
+
+
 def _fire_community_message(
     fire_name: str,
     intersections: LayerResult | None,
     nearest: LayerResult | None,
     active_intersections: LayerResult | None = None,
+    *,
+    burned_area_available: bool = True,
 ) -> str:
     intersecting_names = _place_names(intersections)
     if intersecting_names:
@@ -603,10 +1106,16 @@ def _fire_community_message(
             and intersections.capability_id == "burned_area_intersecting_place_boundaries"
         ):
             when = _human_date(intersections.as_of)
+            # "Reached parts of" is true of one edge pixel and of half a city
+            # alike. Naming the share is what stops the next question - who was
+            # affected - from being answered with a whole city's population.
+            shares = _place_shares(intersections)
+            share_text = f" By area, {shares}." if shares else ""
+            share_text += _place_population(intersections)
             base = (
                 f"By {when}, the mapped burned area of the {fire_name} had reached parts "
                 f"of {names}. This does not mean the whole cities burned—only that some "
-                "areas inside their city boundaries overlap the satellite map."
+                f"areas inside their city boundaries overlap the satellite map.{share_text}"
             )
         else:
             base = (
@@ -634,6 +1143,15 @@ def _fire_community_message(
                     f"boundary. The nearest cities were {ranked}. Being nearby does not "
                     "prove fire impact."
                 )
+        elif not burned_area_available:
+            # A permanent gap and a one-off failure must not read alike. This
+            # event has no burned-area labels on any day, so "try again" is
+            # advice that wastes the user's time.
+            base = (
+                f"The {fire_name} record carries no burned-area labels, on this day or "
+                "any other, so its footprint cannot be compared with city boundaries. "
+                "Only active-fire detections are available for this event."
+            )
         else:
             base = (
                 f"I could not compare the {fire_name} with city boundaries because the "
@@ -795,7 +1313,19 @@ async def fire_lifecycle_asset(event_id: str, filename: str) -> FileResponse:
 async def create_session() -> dict:
     session_id = str(uuid.uuid4())
     _sessions.add(session_id)
-    _session_contexts[session_id] = ConversationContext()
+    context = ConversationContext()
+    # Loaded once per session so "what fires do you have?" is a question the
+    # conversation can answer, rather than one only the sidebar could.
+    try:
+        context.remember_archive(_archive_summary())
+    except Exception:
+        # An unreadable archive is a missing answer, not a failed session.
+        logger.exception("could not summarise the local fire archive")
+    _session_contexts[session_id] = context
+    # A new session has settled nothing, so consent from an earlier one cannot
+    # carry into it.
+    _fill_decisions[session_id] = FillDecisions()
+    _pending_fills.pop(session_id, None)
     return {"session_id": session_id}
 
 
@@ -838,6 +1368,18 @@ class _RenderOutcome:
 
     summary: str | None = None
     layer_ids: list[str] = field(default_factory=list)
+    #: Fetch decisions this session has already made, so a settled question is
+    #: acted on rather than asked again.
+    decisions: FillDecisions = field(default_factory=FillDecisions)
+    #: What an approved fetch returned this turn, by source id, for the session
+    #: to keep. Structured attributes only - never geometry.
+    fetched: dict[str, Any] = field(default_factory=dict)
+    #: Place variables this turn asks about, as the resolver named them. Decides
+    #: what the answer opens with and what travels into its facts.
+    variables: tuple[str, ...] = ()
+    #: An offer to make instead of answering, when data is missing, fetchable,
+    #: and not yet decided.
+    offer: PendingFill | None = None
     facts: dict[str, Any] | None = None
     #: Index-change results only. A context analysis has no formula or inputs,
     #: which is the shape the analytical memory records.
@@ -882,13 +1424,17 @@ async def _render_fire_event(
             analysis_result = await asyncio.to_thread(match.run)
     except (FileNotFoundError, RasterLayerError, ValueError) as exc:
         analysis_error = str(exc)
+    has_burned_area = event_supports_burned_area(
+        fire_plan.dataset.event_id or "", tuple(fire_plan.dataset.dates)
+    )
     fire_data = {
         "status": "matched",
-        "message": (
-            f"{fire_name}: TS-SatFire historical record for {fire_plan.day}. "
-            f"The selected day contains {metrics['active_pixels']:,} AF label pixels; "
-            f"cumulative mapped BA is approximately "
-            f"{metrics['cumulative_burned_km2']:,.1f} km²."
+        "message": _fire_record_message(
+            fire_name,
+            fire_plan.day,
+            metrics["active_pixels"],
+            metrics["cumulative_burned_km2"],
+            burned_area_available=has_burned_area,
         ),
     }
     official_fire_subject = await _automatic_fire_subject(fire_name, fire_year)
@@ -898,7 +1444,118 @@ async def _render_fire_event(
         if official_fire_subject
         else None
     )
+    # Nothing local carries a post-fire debris-flow hazard, so answering
+    # this means finding a source at request time rather than reading one.
+    # The user's own words first: a rewrite inherits the previous turn's
+    # vocabulary and routinely drops the word that made this a debris-flow
+    # question in the first place.
+    asks_post_fire = _asks_post_fire_risk_question(
+        contract.original_request
+    ) or _asks_post_fire_risk_question(contract.analysis_request())
+    if asks_post_fire:
+        gap = missing_variables(DEBRIS_HAZARD_OBJECT)
+        debris_offer = debris_flow_offer(fire_name, gap)
+        debris_pending = (
+            PendingFill(offer=debris_offer, capability_id="post_fire_debris_flow_hazard_areas")
+            if debris_offer
+            else None
+        )
+        if debris_pending and outcome.decisions.approved(debris_pending.key):
+            found = await asyncio.to_thread(
+                debris_flow_fetch, fire_name, debris_offer["endpoint"]
+            )
+            if found.layer:
+                emitted_layer_ids.append("post_fire_debris_flow_hazard_areas")
+                yield _sse("layer", {
+                    "capability_id": "post_fire_debris_flow_hazard_areas",
+                    "title": f"{fire_name} · potential debris-flow hazard areas",
+                    "hazard_object": DEBRIS_HAZARD_OBJECT,
+                    "family": None,
+                    "geometry_type": "Polygon",
+                    "caveat": (
+                        "Modelled hazard areas published for planning. They mark where "
+                        "debris flow is possible after this burn scar, not that one has "
+                        "happened or is forecast."
+                    ),
+                    "feature_count": found.layer.feature_count,
+                    "source": found.source.get("discovered_via", "portal"),
+                    "as_of": fire_plan.day,
+                    "truncated": found.layer.truncated,
+                    "geojson": found.layer.geojson,
+                    # A layer with no legend entry is 1,500 unexplained
+                    # polygons; the review asked for every layer to say what
+                    # it means.
+                    "visualization": {
+                        "kind": "categorical",
+                        "label": "Potential debris-flow hazard area",
+                        "field": "PHASE",
+                        "stops": [
+                            {"value": "1", "label": "Phase 1 assessment", "color": "#8d6e63"}
+                        ],
+                        "popup_fields": [
+                            {"key": "FIRE", "label": "Burn scar"},
+                            {"key": "PHASE", "label": "Assessment phase"},
+                        ],
+                        "explanation": (
+                            "Modelled areas where debris flow is possible below this burn "
+                            "scar. Published for planning; not a forecast of any storm."
+                        ),
+                    },
+                })
+                yield _sse("data_fill", {
+                    "source": found.source,
+                    "closed": list(found.closed),
+                    "remaining": list(debris_offer["remaining"]),
+                    "failed": {},
+                    "suppressed": {},
+                    "places_enriched": found.layer.feature_count,
+                })
+                # Drawn on the map and stated in the answer. Fetching a layer
+                # the reply never mentions spends the user's approval on
+                # something they cannot tell apart from having declined.
+                outcome.fetched["portal_debris_flow"] = _debris_facts(
+                    fire_name,
+                    drawn=found.layer.feature_count,
+                    truncated=found.layer.truncated,
+                    source=found.source.get("discovered_via", "portal"),
+                    remaining=tuple(debris_offer["remaining"]),
+                )
+                fire_data["post_fire_debris_flow"] = _debris_facts(
+                    fire_name,
+                    drawn=found.layer.feature_count,
+                    truncated=found.layer.truncated,
+                    source=found.source.get("discovered_via", "portal"),
+                    remaining=tuple(debris_offer["remaining"]),
+                )
+            elif found.note:
+                yield _sse("data_fill", {
+                    "source": {"endpoint": debris_offer["endpoint"]},
+                    "closed": [],
+                    "remaining": list(debris_offer["remaining"]),
+                    "failed": {"post_fire_debris_flow": found.note},
+                    "suppressed": {},
+                    "places_enriched": 0,
+                })
+                # An approved fetch that came back empty is not the same answer
+                # as one that was never offered, and must not read like it.
+                fire_data["post_fire_debris_flow"] = {
+                    "hazard_areas": 0,
+                    "fetch_failed": found.note,
+                    "burn_scar": fire_name,
+                }
+        elif debris_pending and outcome.decisions.should_ask(debris_pending.key):
+            outcome.offer = debris_pending
+
     community_question = _asks_fire_community_question(contract.analysis_request())
+    asked_attributes = outcome.variables
+    # With no variable named, population is the default: it is what the sentence
+    # prints and what the fill was offered for. Leaving it empty would strip
+    # every fetched figure out of the answer's facts, and the approved fetch
+    # would go invisible again.
+    narrated_attributes = asked_attributes or ("population",)
+    #: Figures the user was stopped and asked to authorise a fetch for. The
+    #: narrator may not drop these, or approving the fetch buys them nothing.
+    authorised_figures: tuple[str, ...] = ()
     answer_communities = communities
     nearest_communities = None
     active_communities = None
@@ -918,15 +1575,21 @@ async def _render_fire_event(
         )
         burned_points = () if isinstance(burned_result, Exception) else burned_result
         active_points = () if isinstance(active_result, Exception) else active_result
+        # The cell size comes from the lifecycle that produced these points, so
+        # "how much of this place" is measured against the same grid it was
+        # counted on rather than a second, independently derived one.
+        cell_km2 = float(lifecycle.get("pixel_area_km2") or 0.0)
         answer_communities = communities_intersecting_burned_area(
             burned_points,
             fire_name,
             fire_plan.day,
+            pixel_area_km2=cell_km2,
         )
         active_communities = communities_intersecting_active_fire(
             active_points,
             fire_name,
             fire_plan.day,
+            pixel_area_km2=cell_km2,
         )
         if not (answer_communities and answer_communities.feature_count):
             nearest_communities = communities_nearest_burned_area(
@@ -941,11 +1604,73 @@ async def _render_fire_event(
                 if not (communities and communities.feature_count)
                 else None
             )
+
+        # A place layer carries GEOIDs but no residents. Whether to go and get
+        # them is the user's call, so this offers rather than fetches.
+        #
+        # Three things have to be true before it is worth a question, and each
+        # of them was a way this asked for nothing. The answer about to be
+        # written has to be one that prints the figures - the fallback above can
+        # swap in the perimeter intersection, whose sentence never mentions
+        # population. The fill has to close a variable the layer does not
+        # already carry. And the session must not have settled this already:
+        # `missing_variables` reads a static table, so left to itself it re-asks
+        # a question the user answered three turns ago.
+        if _answer_reads_population(answer_communities):
+            gap = missing_variables(answer_communities.hazard_object)
+            offer = offer_for(
+                answer_communities.hazard_object,
+                gap,
+                already=variables_present(answer_communities),
+            )
+            pending = (
+                PendingFill(offer=offer, capability_id=answer_communities.capability_id)
+                if offer
+                else None
+            )
+            if pending and outcome.decisions.approved(pending.key):
+                enrichment = await asyncio.to_thread(enrich_places_with_acs, answer_communities)
+                answer_communities = enrichment.layer
+                authorised_figures = _authorised_figures(
+                    answer_communities, only=narrated_attributes
+                )
+                if enrichment.source:
+                    outcome.fetched["census_acs"] = {
+                        "source": enrichment.source.get("source"),
+                        "dataset": enrichment.source.get("dataset"),
+                        "geography": enrichment.source.get("geography"),
+                        "closed": list(enrichment.closed),
+                        "still_missing": list(offer["remaining"]),
+                        "places": _place_facts(answer_communities, lead=asked_attributes),
+                        "do_not": (
+                            "These are whole-place figures. They must never be multiplied "
+                            "by a burned-area share to imply that many residents were "
+                            "affected."
+                        ),
+                    }
+                if enrichment.source or enrichment.failed:
+                    # Reported even when nothing came back. An approved fetch
+                    # that quietly returned nothing is indistinguishable from a
+                    # declined one, which is how consent gets spent for free.
+                    yield _sse(
+                        "data_fill",
+                        {
+                            "source": enrichment.source,
+                            "closed": list(enrichment.closed),
+                            "remaining": list(offer["remaining"]),
+                            "failed": enrichment.failed,
+                            "suppressed": {k: list(v) for k, v in enrichment.suppressed.items()},
+                            "places_enriched": enrichment.enriched_count,
+                        },
+                    )
+            elif pending and outcome.decisions.should_ask(pending.key):
+                outcome.offer = pending
         fire_data["message"] = _fire_community_message(
             fire_name,
             answer_communities,
             nearest_communities,
             active_communities,
+            burned_area_available=has_burned_area,
         )
     elif analysis_result:
         fire_data["message"] = analysis_result["summary"]
@@ -985,6 +1710,14 @@ async def _render_fire_event(
     details.append(
         "Historical air quality is unavailable for this archived event; current AQI was not substituted."
     )
+    if community_question:
+        # Structured, beside the prose. The sentence prints what it has room
+        # for; a later question about income or housing is answered from here
+        # rather than refused by a turn that already holds the figure. Ordered so
+        # the variable the question asked for is the one the reply opens with.
+        fire_data["places"] = _place_facts(
+            answer_communities, lead=narrated_attributes, fetched_only=narrated_attributes
+        )
     fire_data.update({"workflow": "fire", "details": details})
     yield _sse(
         "fire_data",
@@ -1017,6 +1750,7 @@ async def _render_fire_event(
         facts=fire_data,
         fallback=fire_data["message"],
         expertise=_expertise_label(body.expertise_override),
+        preserve=authorised_figures,
     )
     yield _sse("summary", {"text": response_summary})
 
@@ -1035,6 +1769,56 @@ async def _render_city_context(
     emitted_layer_ids = outcome.layer_ids
 
     status, layers = await _automatic_city_context(contract)
+
+    # The resolved city polygon is a Census place: it carries a GEOID and the
+    # `exposure` hazard object, which is everything the ACS fill needs. The fill
+    # used to be wired only to the fire-community branch, so "what is the
+    # population of Santa Barbara" was refused by a turn standing on the
+    # plumbing that answers it.
+    authorised_figures: tuple[str, ...] = ()
+    subject_index = next(
+        (i for i, layer in enumerate(layers) if layer.capability_id == "subject_city_boundary"),
+        None,
+    )
+    asked = outcome.variables
+    if subject_index is not None and asked:
+        subject = layers[subject_index]
+        offer = offer_for(
+            subject.hazard_object,
+            missing_variables(subject.hazard_object),
+            already=variables_present(subject),
+        )
+        pending = (
+            PendingFill(offer=offer, capability_id=subject.capability_id) if offer else None
+        )
+        if pending and outcome.decisions.approved(pending.key):
+            enrichment = await asyncio.to_thread(enrich_places_with_acs, subject)
+            layers[subject_index] = enrichment.layer
+            status["message"] += _place_population(enrichment.layer)
+            status["place"] = _place_facts(
+                enrichment.layer, lead=asked, fetched_only=asked
+            )
+            status.setdefault("details", []).append(enrichment.layer.caveat)
+            authorised_figures = _authorised_figures(enrichment.layer, only=asked)
+            if enrichment.source or enrichment.failed:
+                outcome.fetched["census_acs"] = {
+                    "source": enrichment.source.get("source"),
+                    "closed": list(enrichment.closed),
+                    "still_missing": list(offer["remaining"]),
+                    "places": _place_facts(enrichment.layer, lead=asked),
+                    "failed": enrichment.failed,
+                }
+                yield _sse("data_fill", {
+                    "source": enrichment.source,
+                    "closed": list(enrichment.closed),
+                    "remaining": list(offer["remaining"]),
+                    "failed": enrichment.failed,
+                    "suppressed": {k: list(v) for k, v in enrichment.suppressed.items()},
+                    "places_enriched": enrichment.enriched_count,
+                })
+        elif pending and outcome.decisions.should_ask(pending.key):
+            outcome.offer = pending
+
     yield _sse("fire_data", status)
     for layer in layers:
         emitted_layer_ids.append(layer.capability_id)
@@ -1044,6 +1828,7 @@ async def _render_city_context(
         facts=status,
         fallback=status["message"],
         expertise=_expertise_label(body.expertise_override),
+        preserve=authorised_figures,
     )
     yield _sse("summary", {"text": response_summary})
 
@@ -1051,8 +1836,82 @@ async def _render_city_context(
     outcome.facts = status
 
 
+async def _render_answer(
+    session_id: str,
+    contract: AnalysisContract,
+    body: MessageIn,
+) -> AsyncIterator[dict]:
+    """Render a settled contract, and commit the turn to analytical memory.
+
+    Both the ordinary path and the answer to a fetch offer end here, so the two
+    cannot drift into rendering the same contract differently.
+    """
+    fire_plan = plan_fire_raster(contract)
+    outcome = _RenderOutcome(
+        decisions=_fill_decisions.setdefault(session_id, FillDecisions()),
+        variables=_question_variables(session_id, contract),
+    )
+    renderer = (
+        _render_fire_event(contract, fire_plan, body, outcome)
+        if fire_plan
+        else _render_city_context(contract, body, outcome)
+    )
+    async for event in renderer:
+        yield event
+
+    if outcome.offer is not None:
+        _pending_fills[session_id] = outcome.offer
+        yield _sse("clarification", outcome.offer.as_clarification())
+
+    _remember_completed_analysis(
+        session_id,
+        body.text,
+        contract,
+        fire_plan,
+        outcome.summary,
+        outcome.layer_ids,
+        outcome.analysis,
+        result_facts=outcome.facts,
+        fetched=outcome.fetched,
+    )
+
+
 async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
     config = {"configurable": {"thread_id": session_id}}
+
+    # Waiting on a fetch decision? Then this message is that decision, and the
+    # turn is a re-run of the same question with the answer applied - not a new
+    # question that happens to say "yes".
+    pending = _pending_fills.pop(session_id, None)
+    if pending is not None:
+        approved = pending.decide(body.text)
+        if approved is not None:
+            # Settled for the session. The gap this came from is derived from a
+            # static table that will report it as open again on the next turn;
+            # this is what stops that from becoming the same question again.
+            _fill_decisions.setdefault(session_id, FillDecisions()).record(
+                pending.key, bool(approved)
+            )
+        if approved is None:
+            # Neither agreement nor refusal. Asking again is cheap; acting on a
+            # guess about consent is not, in either direction.
+            _pending_fills[session_id] = pending
+            yield _sse("turn", _turn_payload("discussion"))
+            yield _sse("clarification", pending.as_clarification())
+            return
+        parked = await _graph.aget_state(config)
+        contract = parked.values.get("contract")
+        if isinstance(contract, AnalysisContract) and contract.ready_for_planning:
+            # The contract is already settled and sitting in the checkpointer, so
+            # the decision only changes what the rendering fetches. Re-running the
+            # graph would re-ask everything it already asked.
+            # Answering a fetch offer is the second half of one question.
+            yield _sse("turn", _turn_payload("analysis"))
+            yield _sse("contract", _contract_payload(contract))
+            async for event in _render_answer(session_id, contract, body):
+                yield event
+            yield _sse("done", _contract_payload(contract))
+            return
 
     # Parked on an interrupt? Then this is a clarification answer, not a new question.
     snapshot = await _graph.aget_state(config)
@@ -1060,7 +1919,8 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
 
     payload: dict | Command
     if resuming:
-        yield _sse("turn", {"kind": "analysis"})
+        # Mid-clarification is still the same question; nothing is being replaced.
+        yield _sse("turn", _turn_payload("analysis"))
         payload = Command(resume=body.text)
     else:
         context = _session_contexts.setdefault(session_id, ConversationContext())
@@ -1070,11 +1930,34 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
             yield _sse("error", {"message": str(exc), "type": type(exc).__name__})
             return
 
+        # A question about a hazard nothing local carries needs data, whatever
+        # the resolver made of it. The same principle `request_intent` applies
+        # to data selection: the user's own words settle it, and a rewrite that
+        # inherited the previous turn's vocabulary does not get to say no.
+        if resolution.kind == "discussion" and _asks_post_fire_risk_question(body.text):
+            resolution.kind = "analysis"
+
+        # Asking in plain words for data to be fetched is an instruction. It was
+        # being read as a remark about the map and answered "the analysis does
+        # not include ACS data" - a refusal to do the one thing that was asked.
+        # Consent is explicit in the words, so the offer is not put again; it is
+        # recorded per source, so asking for one does not authorise the others.
+        # Replaced every resolved turn, empty included: a question about income
+        # must not keep leading the answer three turns after it was asked.
+        context.active_variables = list(variables_to_lead(resolution))
+
+        requested = sources_to_fetch(resolution, context)
+        if requested:
+            resolution.kind = "analysis"
+            decisions = _fill_decisions.setdefault(session_id, FillDecisions())
+            for source_id in requested:
+                decisions.record(source_id, True)
+
         if resolution.kind == "discussion":
             # Asking what a result means is not a request for a new result. This
             # turn selects no layer and draws nothing, so the map keeps showing
             # the analysis the question is about.
-            yield _sse("turn", {"kind": "discussion"})
+            yield _sse("turn", _turn_payload("discussion"))
             try:
                 answer = await discuss(
                     question=body.text,
@@ -1101,7 +1984,7 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
             yield _sse("summary", {"text": answer})
             return
 
-        yield _sse("turn", {"kind": "analysis"})
+        yield _sse("turn", _turn_payload("analysis", subject_changed=_subject_changed(resolution)))
         prior_location = None
         prior_contract = snapshot.values.get("contract")
         prior_fire_event_id = (
@@ -1178,23 +2061,6 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
     contract = final.values.get("contract")
     if isinstance(contract, AnalysisContract) and not final.next:
         if contract.ready_for_planning:
-            fire_plan = plan_fire_raster(contract)
-            outcome = _RenderOutcome(layer_ids=emitted_layer_ids)
-            renderer = (
-                _render_fire_event(contract, fire_plan, body, outcome)
-                if fire_plan
-                else _render_city_context(contract, body, outcome)
-            )
-            async for event in renderer:
+            async for event in _render_answer(session_id, contract, body):
                 yield event
-            _remember_completed_analysis(
-                session_id,
-                body.text,
-                contract,
-                fire_plan,
-                outcome.summary,
-                outcome.layer_ids,
-                outcome.analysis,
-                result_facts=outcome.facts,
-            )
         yield _sse("done", _contract_payload(contract))

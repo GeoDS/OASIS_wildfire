@@ -30,6 +30,13 @@ class UnmetNeed(BaseModel):
 
     hazard_object: str
     reason: str
+    #: Required variables nothing supplied. Empty when the hazard object has no
+    #: coverage at all - then the whole object is the gap, not a list of fields.
+    missing_variables: tuple[str, ...] = ()
+    #: Whether an outside source could close this. A gap the deployment could
+    #: have filled from data it already holds is a planning fault, not a
+    #: shopping list.
+    fillable_externally: bool = True
 
 
 class ExecutionPlan(BaseModel):

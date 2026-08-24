@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
+from wildfire_agent import raster_layers
 from wildfire_agent.contract import AnalysisContract, ScalarSlot, SpatialSlot
 from wildfire_agent.raster_layers import (
     FireRasterPlan,
@@ -446,3 +448,170 @@ def test_severity_results_describe_themselves_as_severity_not_as_ndvi():
     # The share a severity panel shows is the damaged one, not "pixels lower":
     # a lower dNBR means less damage, so the NDVI framing inverts the meaning.
     assert result["statistics"]["damaged_percent"] > 50
+
+
+class TestADateRangePicksTheEndNotTheStart:
+    """`_requested_day` searched for one date and took the first it found.
+
+    A contract that carries a span - "the 2020 incident, 2020-09-04 to
+    2020-09-27" - therefore selected the *first* day of the fire. Burned area is
+    cumulative, so day one has none of it, and "which cities were affected" came
+    back "the required mapped fire area was unavailable" for a fire that reached
+    three cities.
+    """
+
+    AVAILABLE: ClassVar[list[str]] = [f"2020-09-{d:02d}" for d in range(4, 28)]
+
+    def _contract(self, text: str, time_horizon: str | None = None) -> AnalysisContract:
+        slots = {}
+        if time_horizon:
+            slots["time_horizon"] = ScalarSlot(value=time_horizon)
+        return AnalysisContract(original_request=text, resolved_request=text, slots=slots)
+
+    def test_a_span_selects_its_end(self):
+        contract = self._contract(
+            "what cities are affected", time_horizon="the 2020 incident, 2020-09-04 to 2020-09-27"
+        )
+        assert raster_layers._requested_day(contract, self.AVAILABLE) == "2020-09-27"
+
+    def test_a_single_date_is_still_that_date(self):
+        contract = self._contract("what burned on 2020-09-12")
+        assert raster_layers._requested_day(contract, self.AVAILABLE) == "2020-09-12"
+
+    def test_a_date_the_archive_lacks_does_not_veto_one_it_has(self):
+        """The membership check ran on the first match only, so a date outside
+        the archive discarded a usable one later in the same sentence."""
+        contract = self._contract("compare 2019-07-01 with 2020-09-12")
+        assert raster_layers._requested_day(contract, self.AVAILABLE) == "2020-09-12"
+
+    def test_no_date_defers_to_the_caller(self):
+        contract = self._contract("what cities are affected")
+        assert raster_layers._requested_day(contract, self.AVAILABLE) is None
+
+    def test_the_end_of_a_span_is_what_the_plan_uses(self):
+        contract = self._contract(
+            "For Bobcat Fire: what cities are affected",
+            time_horizon="active period, 2020-09-04 to 2020-09-27",
+        )
+        plan = plan_fire_raster(contract)
+        assert plan is not None
+        assert plan.day == "2020-09-27"
+
+    def test_a_date_in_the_question_outranks_the_time_slot(self):
+        """The user's own wording settles it, as it does for dataset selection."""
+        contract = self._contract("show the Bobcat Fire on 2020-09-04", time_horizon="2020-09-27")
+        assert raster_layers._requested_day(contract, self.AVAILABLE) == "2020-09-04"
+
+    def test_the_slot_is_used_when_the_question_names_no_date(self):
+        contract = self._contract("what cities are affected", time_horizon="2020-09-12")
+        assert raster_layers._requested_day(contract, self.AVAILABLE) == "2020-09-12"
+
+
+class TestTheCatalogueDoesNotAdvertiseWhatItLacks:
+    """`burned_area_mapping` was set true whenever a VIIRS_Day series existed,
+    without ever checking band 8 for content.
+
+    Two events in the local subset - Thomas Fire and Santa Barbara Co. - carry
+    thousands of active-fire pixels and zero burned-area labels on every single
+    day. The catalogue claimed burned-area mapping for both, and a question
+    about which cities they reached came back "the required mapped fire area was
+    unavailable", which reads as a transient failure rather than as a gap that
+    is permanent for that event.
+    """
+
+    def test_an_event_with_labels_supports_mapping(self, monkeypatch):
+        monkeypatch.setattr(raster_layers, "burned_area_label_points", lambda e, d: ((1.0, 2.0),))
+        raster_layers.event_supports_burned_area.cache_clear()
+        assert raster_layers.event_supports_burned_area("bobcat", ("2020-09-27",)) is True
+
+    def test_an_event_with_none_does_not(self, monkeypatch):
+        monkeypatch.setattr(raster_layers, "burned_area_label_points", lambda e, d: ())
+        raster_layers.event_supports_burned_area.cache_clear()
+        assert raster_layers.event_supports_burned_area("thomas", ("2017-12-13",)) is False
+
+    def test_only_the_last_day_is_read(self, monkeypatch):
+        """Burned area is cumulative, so the final day is the maximum. Reading
+        every day would cost a full raster scan per event per catalogue call."""
+        seen = []
+
+        def spy(event_id, day):
+            seen.append(day)
+            return ((1.0, 2.0),)
+
+        monkeypatch.setattr(raster_layers, "burned_area_label_points", spy)
+        raster_layers.event_supports_burned_area.cache_clear()
+        raster_layers.event_supports_burned_area("e", ("2020-09-04", "2020-09-05", "2020-09-27"))
+        assert seen == ["2020-09-27"]
+
+    def test_an_unreadable_event_is_not_claimed(self, monkeypatch):
+        """A raster that will not open is not evidence that labels exist."""
+
+        def boom(event_id, day):
+            raise raster_layers.RasterLayerError("no band 8")
+
+        monkeypatch.setattr(raster_layers, "burned_area_label_points", boom)
+        raster_layers.event_supports_burned_area.cache_clear()
+        assert raster_layers.event_supports_burned_area("e", ("2020-09-27",)) is False
+
+    def test_an_event_with_no_dates_is_not_claimed(self):
+        raster_layers.event_supports_burned_area.cache_clear()
+        assert raster_layers.event_supports_burned_area("e", ()) is False
+
+
+class TestAPlaceNamedEventCanStillBeNamed:
+    """The guard asked whether the *dataset's* name contains "fire", so four of
+    the nine archived events - Lake Hughes, Mojave / I-15, San Bernardino,
+    Santa Barbara Co. - could not be reached by naming them. Even "show the San
+    Bernardino fire" was dropped; only adding a year rescued it.
+
+    What the guard is actually for is telling "the San Bernardino fire" - a
+    historical event - from "is there a fire near San Bernardino" - a question
+    about now. That distinction is in the user's words, not in the catalogue's.
+    """
+
+    def _datasets(self) -> tuple[RasterDataset, ...]:
+        """A place-named event, exactly like the four in the local subset."""
+        common = {
+            "event_id": "24332783", "event_name": "San Bernardino",
+            "spatial_scope": "San Bernardino NF", "time_start": "2020-07-31",
+            "time_end": "2020-08-11", "dates": ["2020-07-31", "2020-08-11"],
+        }
+        return (
+            RasterDataset(dataset_id="sb-observed", variable="VIIRS_Day", **common),
+            *_datasets(),
+        )
+
+    def _contract(self, text: str) -> AnalysisContract:
+        return AnalysisContract(original_request=text, resolved_request=text)
+
+    def test_naming_the_event_reaches_it(self):
+        plan = plan_fire_raster(self._contract("show the San Bernardino fire"), self._datasets())
+        assert plan is not None and plan.dataset.event_name == "San Bernardino"
+
+    def test_a_current_question_about_the_place_does_not(self):
+        """"a fire near San Bernardino" is about now. Handing back a 2020
+        archive would answer a different question in a confident voice."""
+        plan = plan_fire_raster(
+            self._contract("is there a fire near San Bernardino right now"), self._datasets()
+        )
+        assert plan is None
+
+    def test_the_year_route_still_works(self):
+        plan = plan_fire_raster(
+            self._contract("which areas burned in the San Bernardino in 2020"), self._datasets()
+        )
+        assert plan is not None and plan.dataset.event_name == "San Bernardino"
+
+    def test_a_fire_named_event_is_unaffected(self):
+        plan = plan_fire_raster(self._contract("show the Bobcat fire"), self._datasets())
+        assert plan is not None and "Bobcat" in plan.dataset.event_name
+
+    def test_the_publishers_own_punctuation_does_not_block_it(self):
+        """"the Santa Barbara Co. fire" names an incident just as plainly."""
+        plan = plan_fire_raster(
+            self._contract("tell me about the San Bernardino County fire"), self._datasets()
+        )
+        assert plan is not None and plan.dataset.event_name == "San Bernardino"
+
+    def test_a_weather_question_never_reaches_the_archive(self):
+        assert plan_fire_raster(self._contract("what's the weather in San Bernardino")) is None

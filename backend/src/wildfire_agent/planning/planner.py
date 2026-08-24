@@ -22,7 +22,13 @@ from pydantic import BaseModel, Field
 from ..contract import AnalysisContract
 from ..llm import structured
 from ..taxonomy import HAZARD_OBJECTS, family_choices_for
-from .capabilities import CAPABILITIES, SHOWCASE_AREA, Capability, capabilities_for
+from .capabilities import (
+    CAPABILITIES,
+    SHOWCASE_AREA,
+    Capability,
+    capabilities_for,
+    missing_variables,
+)
 from .models import ExecutionPlan, PlannedLayer, UnmetNeed
 
 #: Words in `time_horizon` (or the original request) that mean "the past".
@@ -250,18 +256,42 @@ def validate_proposal(contract: AnalysisContract, proposal: PlanProposal) -> Exe
             notes.append(f"Dropped {cap.title}: {why}.")
     layers = kept
 
-    unmet = [
-        UnmetNeed(
-            hazard_object=ho,
-            reason=(
-                f"No data source in this deployment covers "
-                f"{(HAZARD_OBJECTS[ho].label if ho in HAZARD_OBJECTS else ho).lower()}. "
-                f"The contract is complete; the capability is missing."
-            ),
-        )
-        for ho in declared
-        if not capabilities_for(ho)
-    ]
+    # Two different gaps, reported differently. A hazard object with no
+    # capability at all is missing wholesale; one whose selected layers cover
+    # only part of its required variables is a partial gap, and naming which
+    # variables are absent is what lets an outside source be asked for them.
+    unmet = []
+    chosen_ids = [layer.capability_id for layer in layers]
+    for ho in declared:
+        label = (HAZARD_OBJECTS[ho].label if ho in HAZARD_OBJECTS else ho).lower()
+        if not capabilities_for(ho):
+            unmet.append(
+                UnmetNeed(
+                    hazard_object=ho,
+                    reason=(
+                        f"No data source in this deployment covers {label}. "
+                        f"The contract is complete; the capability is missing."
+                    ),
+                )
+            )
+            continue
+        absent = missing_variables(ho, chosen_ids)
+        if absent:
+            named = ", ".join(absent)
+            unmet.append(
+                UnmetNeed(
+                    hazard_object=ho,
+                    reason=(
+                        f"The selected layers for {label} do not carry {named}. "
+                        "Everything else the object needs is present."
+                    ),
+                    missing_variables=absent,
+                    # If nothing in the deployment supplies it, only an outside
+                    # source can; if something does, the planner simply did not
+                    # pick it, and fetching would paper over that.
+                    fillable_externally=bool(missing_variables(ho)),
+                )
+            )
 
     if proposal.reading_note:
         notes.insert(0, proposal.reading_note)

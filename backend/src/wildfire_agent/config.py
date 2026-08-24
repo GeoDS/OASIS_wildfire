@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     local_data_root: Path = REPO_ROOT / "backend" / "data"
 
     # ── Service ─────────────────────────────────────────────────────
+    #: Census Data API key. Free, but now required for every query - the old
+    #: keyless allowance is gone, and without it the API answers with an HTML
+    #: page served as HTTP 200.
+    census_api_key: str = ""
+
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     cors_origins: str = "http://localhost:3000"

@@ -197,6 +197,21 @@ HAZARD_OBJECTS: dict[str, HazardObject] = {
             ("fire behaviour models (FARSITE/FlamMap family)", "time-series hotspot differencing"),
         ),
         HazardObject(
+            "post_fire_debris_flow",
+            "hazard",
+            "Post-fire debris flow",
+            (
+                "burn scar extent",
+                "potential hazard area",
+                "watershed subarea",
+                "rainfall threshold",
+            ),
+            (
+                "county post-fire hazard programmes",
+                "USGS post-fire debris-flow assessments",
+            ),
+        ),
+        HazardObject(
             "smoke_plume",
             "hazard",
             "Smoke and air quality",

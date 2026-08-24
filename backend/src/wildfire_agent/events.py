@@ -9,7 +9,7 @@ Every event is `event: <name>` with a JSON `data:` payload.
 
 | event           | payload                                          | when |
 |-----------------|--------------------------------------------------|------|
-| `turn`          | `{kind}` - `analysis` or `discussion`             | first event of every turn |
+| `turn`          | `{kind, subject_changed}` - see below              | first event of every turn |
 | `stage`         | `{node, label, agent}`                           | a pipeline stage starts |
 | `contract`      | the full `AnalysisContract`, plus `pending_slots` and `filled_ratio` | the contract changes |
 | `clarification` | `{type, preamble, questions[], pending_slots[]}`  | the run pauses for the user |
@@ -19,6 +19,7 @@ Every event is `event: <name>` with a JSON `data:` payload.
 | `fire_lifecycle`| AF/BA layers, dates, and daily event metrics       | when a TS-SatFire event matches |
 | `spatial_analysis`| typed derived-raster result, views, statistics, and provenance | after a supported calculation |
 | `fire_context`  | land-cover composition, terrain, spread behaviour and fire weather | after a supported context analysis |
+| `data_fill`     | `{source, closed, remaining, failed, suppressed}` | after an approved external fetch |
 | `summary`       | `{text}`                                          | prose summary of the result |
 | `done`          | the final `AnalysisContract`                      | the run finished |
 | `error`         | `{message, type}`                                 | anything failed |
@@ -35,6 +36,13 @@ Notes for consumers:
 - **`turn` always arrives first**, so a consumer knows before any payload whether
   this turn will replace the map. A `discussion` turn runs no pipeline: it emits
   `summary` and ends, and the previous result stays on screen.
+- **`turn.subject_changed`** says whether this turn is about something other than
+  the last one. `false` means the same subject is being refreshed, and holding
+  the previous layers until each replacement arrives keeps the map steady. `true`
+  means they describe a different place and should be cleared at once - otherwise
+  the map keeps drawing the old subject, and stays centred on it, until the first
+  new layer lands seconds later. Discussion turns are always `false`. See
+  `docs/05-turn-subject-change.md` for the frontend contract.
 - **The stream uses CRLF.** Blocks are separated by `\\r\\n\\r\\n`. A parser that
   splits only on `\\n\\n` receives nothing while the server logs a clean 200.
 """
@@ -54,6 +62,7 @@ EventName = Literal[
     "fire_lifecycle",
     "spatial_analysis",
     "fire_context",
+    "data_fill",
     "summary",
     "done",
     "error",
@@ -71,6 +80,7 @@ EVENT_NAMES: tuple[str, ...] = (
     "fire_lifecycle",
     "spatial_analysis",
     "fire_context",
+    "data_fill",
     "summary",
     "done",
     "error",

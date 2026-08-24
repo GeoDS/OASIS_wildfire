@@ -462,3 +462,31 @@ def test_fire_followup_preserves_model_compiled_time_range():
     assert any(
         "event 24461771, time 2020-09-04 to 2020-09-27" in item for item in contract.assumptions
     )
+
+
+def test_no_prompt_names_a_real_place():
+    """A concrete place inside a live prompt is a thumb on the scale.
+
+    The clarification-interpretation prompt carried `"10 km buffer around
+    Altadena, CA"` as its worked example, and that prompt runs on every
+    clarification turn whatever the user asked about - so a question about
+    Santa Barbara was shown Altadena as the shape of a correct answer.
+    Placeholders carry the same format without naming anywhere.
+    """
+    from wildfire_agent.graph import prompts
+
+    sources = [
+        getattr(prompts, name)
+        for name in dir(prompts)
+        if not name.startswith("__") and isinstance(getattr(prompts, name), str)
+    ]
+    sources += [
+        prompts.requirement_understanding_prompt(),
+        prompts.task_compiler_prompt(["assess_risk"], "general"),
+        prompts.clarification_prompt("general", ["location"]),
+        prompts.interpretation_prompt(["location"], ["location", "target"], ["viirs_af"]),
+    ]
+    banned = ("Altadena", "Monrovia", "Duarte", "Arcadia", "Pasadena", "Santa Barbara", "Bobcat")
+    for text in sources:
+        for name in banned:
+            assert name not in text, f"{name!r} is baked into a prompt"

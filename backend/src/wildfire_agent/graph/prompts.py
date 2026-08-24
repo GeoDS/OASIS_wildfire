@@ -183,8 +183,11 @@ crammed into the answer you were expecting. If the reply to a data-type question
 - Only emit an update for a slot the reply actually addresses. Do not guess.
 - Keep each value to one slot's worth of meaning. Never concatenate two slots' answers into \
 one string.
-- Normalise into a short, machine-usable phrase (e.g. "10 km buffer around Altadena, CA", \
-"census_tract").{families}
+- Normalise into a short, machine-usable phrase. The shape to copy is \
+"<radius> km buffer around [city A], [state]" or "census_tract" - the placeholders stand \
+for whatever the user actually named. Never carry a place from this instruction into your \
+answer; this prompt runs for every question, and the one in front of you may be about \
+somewhere else entirely.{families}
 - If the user answered vaguely, list the slot under `still_unresolved` instead of forcing a value.
 - If the user says something like "you decide" / "I don't know" / "whatever", set \
 `user_declined` to true. We will then stop asking and fall back to documented defaults.

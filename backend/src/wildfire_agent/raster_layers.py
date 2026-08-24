@@ -122,6 +122,30 @@ def raster_catalog_payload() -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=64)
+def event_supports_burned_area(event_id: str, dates: tuple[str, ...]) -> bool:
+    """Whether this event actually carries burned-area labels.
+
+    The catalogue used to claim burned-area mapping for any event with a
+    VIIRS_Day series, without ever looking inside band 8. Two events in the
+    local subset carry thousands of active-fire pixels and no burned-area labels
+    on any day, and a question about which cities they reached came back "the
+    required mapped fire area was unavailable" - which reads as a transient
+    failure rather than a gap that is permanent for that event.
+
+    Only the last day is read. Burned area is accumulated through the selected
+    date, so the final day is the maximum: if it is empty, every day is. That
+    keeps this to one raster read per event, cached, rather than a full scan.
+    """
+    if not dates:
+        return False
+    try:
+        return bool(burned_area_label_points(event_id, dates[-1]))
+    except (RasterLayerError, FileNotFoundError, ValueError):
+        # A raster that will not open is not evidence that labels exist.
+        return False
+
+
 def fire_event_catalog_payload() -> dict[str, Any]:
     """Group raster series into TS-SatFire events rather than generic places."""
     grouped: dict[str, dict[str, Any]] = {}
@@ -148,12 +172,15 @@ def fire_event_catalog_payload() -> dict[str, Any]:
         if dataset.variable == "VIIRS_Day":
             event["dates"] = dataset.dates
             event["task_support"]["active_fire_detection"] = True
-            event["task_support"]["burned_area_mapping"] = True
         elif dataset.variable == "FirePred":
             event["task_support"]["next_day_prediction_inputs"] = True
     events = sorted(grouped.values(), key=lambda item: (item["event_name"], item["event_id"]))
     for event in events:
         event["variables"] = sorted(set(event["variables"]))
+        # Read from the data, not inferred from the variable being present.
+        event["task_support"]["burned_area_mapping"] = event_supports_burned_area(
+            event["event_id"], tuple(event["dates"])
+        )
     return {
         "dataset": "TS-SatFire local subset",
         "event_count": len(events),
@@ -179,19 +206,37 @@ def _contract_search_text(contract: AnalysisContract) -> str:
 
 
 def _requested_day(contract: AnalysisContract, available: list[str]) -> str | None:
-    text = " ".join(
-        [
-            contract.analysis_request(),
-            contract.restatement or "",
-            contract.slots.get("time_horizon").value or ""
-            if contract.slots.get("time_horizon")
-            else "",
+    """The day this contract asks for, or None to let the caller default.
+
+    Two rules, and the order between them matters.
+
+    **The request outranks the slot.** A date the user put in the question wins
+    over whatever the time_horizon slot holds, the same way `plan_fire_raster`
+    lets only the original wording authorise fire-data selection at all.
+
+    **A span resolves to its end.** Every date is read, not the first one. A
+    clarification answered "the 2020 incident" comes back carrying the event's
+    whole date range, and taking the first match selected the fire's opening
+    day - which, because burned area is cumulative, has none of it. "Which
+    cities were affected" then answered "the required mapped fire area was
+    unavailable" about a fire that had reached three. A question about a period
+    asks what it came to, not what it started from.
+
+    Membership is tested per date rather than once, so a date the archive lacks
+    no longer discards a usable one later in the same sentence.
+    """
+    slot = contract.slots.get("time_horizon")
+
+    def latest_in(text: str) -> str | None:
+        found = [
+            match.group("date")
+            for match in _DATE_RE.finditer(text)
+            if match.group("date") in available
         ]
-    )
-    requested = _DATE_RE.search(text)
-    if requested and requested.group("date") in available:
-        return requested.group("date")
-    return None
+        return max(found) if found else None
+
+    asked = latest_in(" ".join([contract.analysis_request(), contract.restatement or ""]))
+    return asked or latest_in(slot.value or "" if slot else "")
 
 
 def plan_fire_raster(
@@ -220,9 +265,30 @@ def plan_fire_raster(
     for dataset in available:
         if not dataset.event_name:
             continue
+        # Four of the archived events are named for a place rather than for a
+        # fire - Lake Hughes, Mojave / I-15, San Bernardino, Santa Barbara Co.
+        # The old guard asked whether the *dataset's* name contained "fire",
+        # which made all four unreachable: even "show the San Bernardino fire"
+        # was dropped, and only adding a year rescued them.
+        #
+        # What the guard is for is telling "the San Bernardino fire" - a
+        # historical event - from "is there a fire near San Bernardino" - a
+        # question about now. That is in the user's words, so look there: the
+        # event's name immediately followed by "fire" is someone naming an
+        # incident. A fire word merely present in the sentence is not.
         named_fire = bool(re.search(r"\bfire\b", dataset.event_name, re.IGNORECASE))
+        # Against the raw request, not `search_text`: that one strips the word
+        # "fire" while normalising, so the pairing this looks for is gone by then.
+        key = _normalise_fire_name(dataset.event_name)
+        named_as_incident = bool(key) and bool(
+            re.search(
+                rf"\b{re.escape(key)}\b(?:\W+(?:co|county|area))?\W+fire\b",
+                request_lower,
+                re.IGNORECASE,
+            )
+        )
         id_qualified = bool(dataset.event_id and dataset.event_id.lower() in request_lower)
-        if not named_fire and not archive_qualified and not id_qualified:
+        if not (named_fire or named_as_incident or archive_qualified or id_qualified):
             continue
         event_groups.setdefault(dataset.event_name, []).append(dataset)
 
@@ -518,6 +584,10 @@ def render_fire_lifecycle(event_id: str, *, day: str | None = None) -> dict[str,
         "layers": layers,
         "timeline": metadata.get("timeline") or [],
         "selected_metrics": selected_metrics,
+        #: Area of one grid cell. Anything converting a pixel count into km²
+        #: needs this, and recomputing it from the transform elsewhere is how
+        #: two parts of the system come to disagree about the same footprint.
+        "pixel_area_km2": float(metadata.get("pixel_area_km2") or 0.0),
         "source_label": "TS-SatFire local historical subset",
         "caveat": (
             "AF and BA are historical dataset labels. Mapped grid area is approximate; "

@@ -19,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .external_sources import catalogue
 from .llm import get_chat_model, is_mock
 
 #: Numbers written any of the ways prose writes them: 1116, 1,116, 276.9, 88%.
@@ -89,28 +90,60 @@ _NOT_A_PLACE = frozenset(
     }
 )
 
-_SYSTEM_PROMPT = """You are the voice of a wildfire geospatial analyst.
+_SYSTEM_PROMPT = """You are a wildfire geospatial analyst answering a colleague.
 
-You are given the facts the analysis already computed. Write the analyst's reply
-to the user in English.
+You are given the facts the analysis already computed. Write the reply.
+
+Write the way a competent research assistant talks: lead with the answer, give
+the figure that settles it, add the one thing they would get wrong if you left
+it out. Not a form letter, not a disclaimer with a number buried in it.
 
 Absolute rules:
 1. Use ONLY the supplied facts. Never introduce a number, percentage, date,
    place name, fire name, or dataset that is not in them.
 2. Never upgrade an observation into a cause. A satellite label shows what was
    detected, not what happened or why.
-3. Keep any uncertainty the facts record. If a caveat is supplied, carry its
-   meaning; you may re-word it, you may not drop it.
-4. If the facts do not answer what the user asked, say so plainly and state what
+3. Carry the caveat that guards a figure you actually state. A share, a
+   population, a pixel count each have a specific way of being misread, and the
+   caveat that prevents it travels with the number. You may re-word it; you may
+   not drop it and still quote the number.
+4. Do NOT recite standing properties of the archive that no figure in your reply
+   depends on. That there is no official perimeter, no trained-model output and
+   no historical air quality is true of every answer this system gives. Saying
+   it every time buries the one caveat that matters this time, and reads as the
+   system talking about itself instead of answering. State it when the user asks
+   what is missing, or when it changes how to read a number you just gave.
+5. If the facts do not answer what the user asked, say so plainly and state what
    they do cover. Do not fill the gap.
-5. Answer the question that was actually asked, at the register requested.
+6. When the missing thing is something this deployment can fetch, say so and name
+   the source, rather than stopping at "not available". The user can authorise it;
+   a flat refusal hides that the answer is one question away. Never claim to have
+   fetched anything - you are writing the reply, not making the request.
+7. Answer the question that was actually asked, at the register requested. Open
+   with the variable they asked about. When the facts carry more than that, the
+   rest follows as support in a later sentence - it does not go first, and a
+   figure nobody asked for does not need to appear at all.
+8. A template sentence built from the same facts may be supplied. It exists so
+   you can check you have missed nothing. It is NOT a draft to reword. Do not
+   follow its sentence order, do not mirror its phrasing, and do not repeat a
+   caveat just because it appears there. Answering from the facts and happening
+   to agree with it is right; paraphrasing it is not.
+
+External sources this deployment can fetch on request:
+{sources}
 
 Style: 2-4 sentences of plain, direct English. No bullet lists, no headings, no
-restating the question back. Write as an analyst talking to a colleague, not as
-a form letter. The reply is rendered as plain text, so write no markdown: no
+restating the question back. Do not open with "The available facts", "The
+analysis shows", "The record indicates" or any other throat-clearing about the
+data - open with the answer. One hedge where it is load-bearing beats a hedge in
+every sentence. The reply is rendered as plain text, so write no markdown: no
 asterisks, backticks, bullets, or headings."""
 
-_DISCUSSION_PROMPT = """You are the voice of a wildfire geospatial analyst.
+_DISCUSSION_PROMPT = """You are a wildfire geospatial analyst answering a colleague.
+
+Write the way a competent research assistant talks: lead with the answer, then
+the reasoning. Not a form letter, not a recital of what the system does and does
+not hold.
 
 The user is asking about the analysis already on their screen - what a term
 means, why a method behaves as it does, how to read a result. No new analysis is
@@ -126,13 +159,48 @@ Absolute rules:
 2. Never introduce a number, percentage, date, place name, or fire name that is
    not in the supplied material. General explanation is welcome; new specifics
    are not.
-3. If answering would require data that is not present, say what is missing and
-   what would be needed, rather than estimating it.
-4. Do not claim an analysis was re-run. Nothing was recomputed for this turn.
+3. The context may carry a `fetched` section: what approved external fetches
+   have already returned this session. Those figures are in hand. Answer from
+   them. Telling the user data is unavailable while it sits in `fetched` is the
+   worst answer this system can give - they were stopped and asked to authorise
+   that fetch, and they said yes.
+4. If answering would genuinely require data that is in neither the facts nor
+   `fetched`, say what is missing and what would be needed, rather than
+   estimating it.
+5. Do not claim an analysis was re-run. Nothing was recomputed for this turn.
+6. Do NOT recite standing properties of the archive that nothing in your answer
+   depends on. Repeating what the dataset is not, every time, reads as the
+   system talking about itself instead of answering the question.
+7. When something genuinely missing is fetchable, name the source and say it can
+   be fetched. "Not available" and "not available yet, and here is where it comes
+   from" are different answers, and only the second one is true.
+8. The context may carry an `archive` section: the historical fire events this
+   deployment holds, each with its date span and whether it has burned-area
+   labels or only active-fire detections. A question about what data exists is
+   answered from it - name the fires. Do not answer it by describing the map.
+9. Open with the variable they asked about. Other figures in the material follow
+   as support if they help, and stay out if they do not. Asked about income, do
+   not open with a population count.
+
+External sources this deployment can fetch on request:
+{sources}
 
 Style: 2-5 sentences of plain, direct English, pitched to the expertise level
-given. Explain the idea, do not lecture. The reply is rendered as plain text, so
-write no markdown: no asterisks, backticks, bullets, or headings."""
+given. Do not open with "The available analysis", "The supplied facts" or any
+other throat-clearing about the material - open with the answer. Explain the
+idea, do not lecture. The reply is rendered as plain text, so write no markdown:
+no asterisks, backticks, bullets, or headings."""
+
+
+def _with_sources(prompt: str) -> str:
+    """Fold the live source catalogue into a prompt.
+
+    The resolver was told what this deployment can fetch; the two prompts that
+    actually write to the user were not. So a refusal read "that is not
+    available" when the honest answer was "not yet - it comes from the Census
+    ACS, and I can fetch it if you say so".
+    """
+    return prompt.format(sources=catalogue())
 
 
 class NarrationRejected(RuntimeError):
@@ -246,17 +314,49 @@ async def _draft(system: str, human: str) -> str:
     return draft.text.strip()
 
 
+def verify_preserved(text: str, required: tuple[str, ...]) -> str:
+    """Return `text` unchanged, or raise if it dropped an authorised figure.
+
+    `verify_grounded` is deliberately one-directional: prose may say less than
+    the facts, because trimming is the narrator's job. That holds for figures
+    the analysis computed on its own. It does not hold for figures the user was
+    stopped and asked to authorise a network fetch for - dropping those spends
+    someone's consent on a reply they cannot tell apart from a refusal.
+
+    One is enough, deliberately. The rule being enforced is that an approved
+    fetch visibly changed the answer, not that every value it returned appears
+    in every later reply. Demanding all of them rejected a sound answer about
+    income for omitting the populations, and the fallback it dropped to was a
+    paragraph about which cities were reached - not what was asked.
+    """
+    if not required:
+        return text
+    written = _figures(text)
+    if not any(figure in written for figure in _figures(" ".join(required))):
+        raise NarrationRejected(
+            "used none of the figures the user approved a fetch for: "
+            f"{sorted(_figures(' '.join(required)))}"
+        )
+    return text
+
+
 async def narrate(
     *,
     question: str,
     facts: Any,
     fallback: str,
     expertise: str = "general",
+    preserve: tuple[str, ...] = (),
 ) -> str:
     """Re-word computed facts as an answer to `question`.
 
     Returns `fallback` - the deterministic sentence - whenever the model is
     unavailable, errors, or produces a draft that fails verification.
+
+    `preserve` names figures that arrived through a fetch the user approved.
+    They are asked for in the prompt and checked in the draft, so an answer the
+    user paid a question for cannot come back reading like the one they would
+    have got by declining.
     """
     if is_mock():
         return fallback
@@ -264,11 +364,21 @@ async def narrate(
         f"The user asked:\n{question}\n\n"
         f"Requested expertise level: {expertise}\n\n"
         f"Facts computed by the analysis:\n{_fact_corpus(facts)}\n\n"
-        f"The deterministic summary of these facts reads:\n{fallback}\n\n"
-        "Write the analyst's reply."
+        "A template sentence generated from those same facts follows. It is a "
+        "checklist, not a draft: use it to confirm you have missed nothing, then "
+        "answer the question in your own order and your own words.\n"
+        f"{fallback}\n\n"
     )
+    if preserve:
+        human += (
+            "The user was asked to authorise an external fetch for these figures and "
+            f"agreed, so every one of them must appear in your reply: {', '.join(preserve)}. "
+            "Take an extra sentence or two if you need it; carry their caveat with them.\n\n"
+        )
+    human += "Answer the question."
     try:
-        return verify_grounded(await _draft(_SYSTEM_PROMPT, human), [facts, fallback])
+        draft = verify_grounded(await _draft(_with_sources(_SYSTEM_PROMPT), human), [facts, fallback])
+        return verify_preserved(draft, preserve)
     except Exception:  # noqa: BLE001 - rejection, provider error, timeout: all fall back
         return fallback
 
@@ -320,7 +430,7 @@ async def discuss(
     human = base
     for _attempt in range(2):
         model = get_chat_model().with_structured_output(_Discussion)
-        draft: _Discussion = await model.ainvoke([("system", _DISCUSSION_PROMPT), ("human", human)])
+        draft: _Discussion = await model.ainvoke([("system", _with_sources(_DISCUSSION_PROMPT)), ("human", human)])
         try:
             verify_layer_claims(draft.layers_referenced, corpus)
         except NarrationRejected as exc:
