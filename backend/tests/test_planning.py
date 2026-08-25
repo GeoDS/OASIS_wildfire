@@ -213,6 +213,16 @@ class TestExecution:
         text = summarise(execute(plan, contract), plan)
         assert "Not available" in text
 
+    def test_summary_names_domain_objects_instead_of_features(self):
+        contract = _contract(
+            target="official_fire_perimeters",
+            hazards=["active_fire"],
+        )
+        plan = deterministic_plan(contract)
+        text = summarise(execute(plan, contract), plan)
+        assert "fire-boundary polygon" in text
+        assert " feature" not in text
+
 
 class TestShowcaseData:
     @pytest.mark.parametrize("capability_id", sorted(CAPABILITIES))

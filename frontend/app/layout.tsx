@@ -3,9 +3,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Wildfire Analyst Agent — User Goal Agent",
+  title: "Wildfire Analyst",
   description:
-    "Task 1 - compile a natural-language request into a structured Analysis Contract",
+    "Explore fire boundaries, heat anomalies, timelines, and source-backed analysis in one workspace.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

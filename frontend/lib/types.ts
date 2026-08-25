@@ -425,3 +425,34 @@ export interface ChatMessage {
   /** Clarification payload, so agent turns can render their options as buttons */
   clarification?: ClarificationPayload;
 }
+
+export type SessionStatus = "idle" | "analyzing" | "complete" | "failed";
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  status: SessionStatus;
+  preview: string;
+  message_count: number;
+}
+
+export interface WorkspaceSnapshot {
+  status: SessionStatus;
+  messages: ChatMessage[];
+  contract: AnalysisContract | null;
+  stages: Record<StageId, StageStatus>;
+  plan: ExecutionPlan | null;
+  layers: LayerResult[];
+  rasters: RasterLayerResult[];
+  fireDataStatus: FireDataStatus | null;
+  fireLifecycle: FireLifecycle | null;
+  spatialAnalysis: SpatialAnalysis | null;
+  fireContext: FireContext | null;
+  analysisView: "before" | "after" | "difference";
+}
+
+export interface ArchivedSession extends SessionSummary {
+  snapshot: Partial<WorkspaceSnapshot>;
+}

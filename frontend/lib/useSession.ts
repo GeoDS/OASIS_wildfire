@@ -4,10 +4,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   createSession,
+  deleteSession as deleteArchivedSession,
   fetchFireLifecycle,
   getHealth,
+  getSession,
   getTaxonomy,
+  listSessions,
+  renameSession as renameArchivedSession,
   resolveApiUrl,
+  saveSessionSnapshot,
   sendMessage,
 } from "./api";
 import {
@@ -23,10 +28,12 @@ import {
   type Health,
   type LayerResult,
   type RasterLayerResult,
+  type SessionSummary,
   type SpatialAnalysis,
   type StageId,
   type StageStatus,
   type Taxonomy,
+  type WorkspaceSnapshot,
 } from "./types";
 
 function initialStages(): Record<StageId, StageStatus> {
@@ -42,6 +49,8 @@ function initialStages(): Record<StageId, StageStatus> {
 
 export function useSession() {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [health, setHealth] = useState<Health | null>(null);
   const [taxonomy, setTaxonomy] = useState<Taxonomy | null>(null);
 
@@ -66,6 +75,7 @@ export function useSession() {
   const [error, setError] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  const readyToPersistRef = useRef(false);
 
   // Slots the current analysis turn has not refreshed yet. A turn replaces a
   // slot the moment its first payload arrives, so the previous answer stays
@@ -79,7 +89,7 @@ export function useSession() {
     getTaxonomy().then(setTaxonomy).catch(() => undefined);
   }, []);
 
-  const reset = useCallback(async () => {
+  const clearWorkspace = useCallback(() => {
     abortRef.current?.abort();
     staleRef.current.clear();
     setMessages([]);
@@ -97,16 +107,89 @@ export function useSession() {
     setLifecycleBusy(false);
     setError(null);
     setBusy(false);
+  }, []);
+
+  const refreshSessions = useCallback(async () => {
+    const items = await listSessions();
+    setSessions(items);
+    return items;
+  }, []);
+
+  const reset = useCallback(async () => {
+    readyToPersistRef.current = false;
+    clearWorkspace();
     try {
       setSessionId(await createSession());
+      readyToPersistRef.current = true;
+      await refreshSessions();
     } catch (e) {
       setError((e as Error).message);
     }
-  }, []);
+  }, [clearWorkspace, refreshSessions]);
+
+  const openSession = useCallback(async (id: string) => {
+    if (id === sessionId || busy) return;
+    readyToPersistRef.current = false;
+    clearWorkspace();
+    setHistoryLoading(true);
+    try {
+      const archived = await getSession(id);
+      const snapshot = archived.snapshot;
+      setSessionId(id);
+      setMessages(snapshot.messages ?? []);
+      setContract(snapshot.contract ?? null);
+      setStages(snapshot.stages ?? initialStages());
+      setPlan(snapshot.plan ?? null);
+      setLayers(snapshot.layers ?? []);
+      setRasters(snapshot.rasters ?? []);
+      setFireDataStatus(snapshot.fireDataStatus ?? null);
+      setFireLifecycle(snapshot.fireLifecycle ?? null);
+      setSpatialAnalysis(snapshot.spatialAnalysis ?? null);
+      setFireContext(snapshot.fireContext ?? null);
+      setAnalysisView(snapshot.analysisView ?? "difference");
+      readyToPersistRef.current = true;
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [busy, clearWorkspace, sessionId]);
+
+  const renameSession = useCallback(async (id: string, title: string) => {
+    await renameArchivedSession(id, title);
+    await refreshSessions();
+  }, [refreshSessions]);
+
+  const removeSession = useCallback(async (id: string) => {
+    await deleteArchivedSession(id);
+    const remaining = await refreshSessions();
+    if (id !== sessionId) return;
+    if (remaining[0]) await openSession(remaining[0].id);
+    else await reset();
+  }, [openSession, refreshSessions, reset, sessionId]);
 
   useEffect(() => {
-    void reset();
-    // Create the session once, on mount
+    let cancelled = false;
+    const bootstrap = async () => {
+      setHistoryLoading(true);
+      try {
+        const archived = await refreshSessions();
+        if (cancelled) return;
+        if (archived[0]) await openSession(archived[0].id);
+        else await reset();
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message);
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    };
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
+    // Session bootstrap is intentionally a one-time operation. The callbacks
+    // above change identity while a turn is running; subscribing to them here
+    // would reopen the latest archived result every time `busy` changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -338,7 +421,54 @@ export function useSession() {
     [spatialAnalysis],
   );
 
+  useEffect(() => {
+    if (!sessionId || !readyToPersistRef.current || historyLoading) return;
+    const snapshot: WorkspaceSnapshot = {
+      status: error ? "failed" : busy ? "analyzing" : messages.length ? "complete" : "idle",
+      messages,
+      contract,
+      stages,
+      plan,
+      layers,
+      rasters,
+      fireDataStatus,
+      fireLifecycle,
+      spatialAnalysis,
+      fireContext,
+      analysisView,
+    };
+    const timer = window.setTimeout(() => {
+      void saveSessionSnapshot(sessionId, snapshot)
+        .then(refreshSessions)
+        .catch(() => undefined);
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [
+    analysisView,
+    busy,
+    contract,
+    error,
+    fireContext,
+    fireDataStatus,
+    fireLifecycle,
+    historyLoading,
+    layers,
+    messages,
+    plan,
+    rasters,
+    refreshSessions,
+    sessionId,
+    spatialAnalysis,
+    stages,
+  ]);
+
   return {
+    sessionId,
+    sessions,
+    historyLoading,
+    openSession,
+    renameSession,
+    removeSession,
     health,
     taxonomy,
     messages,

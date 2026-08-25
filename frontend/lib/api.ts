@@ -16,7 +16,10 @@ import type {
   PublicLayerResponse,
   PublicSource,
   RasterLayerResult,
+  ArchivedSession,
+  SessionSummary,
   Taxonomy,
+  WorkspaceSnapshot,
 } from "./types";
 
 const API_BASE =
@@ -113,6 +116,41 @@ export async function createSession(): Promise<string> {
   if (!res.ok) throw new Error(`Could not create a session: HTTP ${res.status}`);
   const body = (await res.json()) as { session_id: string };
   return body.session_id;
+}
+
+export async function listSessions(): Promise<SessionSummary[]> {
+  const body = await getJson<{ sessions: SessionSummary[] }>("/api/sessions");
+  return body.sessions;
+}
+
+export const getSession = (sessionId: string) =>
+  getJson<ArchivedSession>(`/api/sessions/${sessionId}`);
+
+export async function saveSessionSnapshot(
+  sessionId: string,
+  snapshot: WorkspaceSnapshot,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/snapshot`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ snapshot }),
+  });
+  if (!res.ok) throw new Error(`Could not save session: HTTP ${res.status}`);
+  return res.json() as Promise<{ ok: boolean }>;
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`Could not rename session: HTTP ${res.status}`);
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Could not delete session: HTTP ${res.status}`);
 }
 
 /**

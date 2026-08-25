@@ -26,6 +26,32 @@ from .models import ExecutionPlan, LayerResult
 #: browser is the bottleneck, not the file.
 MAX_FEATURES = 1500
 
+_RESULT_NOUNS: dict[str, tuple[str, str]] = {
+    "burned_area": ("burned-area region", "burned-area regions"),
+    "fire_perimeter": ("fire-boundary polygon", "fire-boundary polygons"),
+    "satellite_hotspot": ("thermal-anomaly point", "thermal-anomaly points"),
+    "population_exposure": ("affected community", "affected communities"),
+}
+
+
+def _result_noun(result: LayerResult, *, plural: bool) -> str:
+    # ``active_fire`` is an analytical concept, not an object type. Its two
+    # available sources represent very different things, so name the mapped
+    # object instead of collapsing both into the vague word “detection”.
+    if result.capability_id in {"official_fire_perimeters", "historical_fire_perimeters"}:
+        return ("fire-boundary polygon", "fire-boundary polygons")[plural]
+    if result.capability_id == "satellite_hotspots":
+        return ("thermal-anomaly point", "thermal-anomaly points")[plural]
+    named = _RESULT_NOUNS.get(result.hazard_object)
+    if named:
+        return named[1 if plural else 0]
+    fallback = {
+        "Point": ("mapped point", "mapped points"),
+        "Polygon": ("mapped polygon", "mapped polygons"),
+        "LineString": ("mapped line", "mapped lines"),
+    }.get(result.geometry_type, ("mapped object", "mapped objects"))
+    return fallback[1 if plural else 0]
+
 
 def _bbox_for(contract: AnalysisContract) -> tuple[float, float, float, float]:
     """The clip box: the contract's resolved scope, else the whole showcase area."""
@@ -255,8 +281,7 @@ def summarise(results: list[LayerResult], plan: ExecutionPlan) -> str:
 
     if drawn:
         parts = [
-            f"{r.feature_count} "
-            f"{'feature' if r.feature_count == 1 else 'features'} of {r.title.lower()}"
+            f"{r.feature_count} {_result_noun(r, plural=r.feature_count != 1)}"
             for r in drawn
         ]
         lines.append("Drawn on the map: " + "; ".join(parts) + ".")
@@ -270,7 +295,8 @@ def summarise(results: list[LayerResult], plan: ExecutionPlan) -> str:
     for r in results:
         if r.truncated:
             lines.append(
-                f"{r.title} was capped at {MAX_FEATURES} features for display, so counts "
+                f"{r.title} was capped at {MAX_FEATURES} {_result_noun(r, plural=True)} "
+                "for display, so counts "
                 f"shown are not totals."
             )
     for need in plan.unmet:

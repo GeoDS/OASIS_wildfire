@@ -18,6 +18,7 @@ node_modules/
 .next/
 out/
 .pnpm-store/
+.runtime/
 
 # OS / editor
 .DS_Store

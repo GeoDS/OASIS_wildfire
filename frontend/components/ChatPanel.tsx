@@ -36,7 +36,7 @@ function OptionButton({
   return (
     <button
       onClick={onPick}
-      className="group block w-full rounded-xl border border-paper-300 bg-white px-3 py-2.5 text-left transition hover:border-ember-300 hover:bg-ember-50"
+      className="group block min-h-11 w-full rounded-xl border border-paper-300 bg-white px-3 py-2.5 text-left transition hover:border-ember-300 hover:bg-ember-50"
     >
       <span className="flex items-baseline gap-2">
         <span className="text-[13px] font-medium text-ink-900">{label}</span>
@@ -89,6 +89,7 @@ export function ChatPanel({
   inferredExpertise,
   onExpertiseChange,
   onSend,
+  onClose,
 }: {
   messages: ChatMessage[];
   busy: boolean;
@@ -97,6 +98,7 @@ export function ChatPanel({
   inferredExpertise: ExpertiseLevel | null;
   onExpertiseChange: (level: ExpertiseLevel | null) => void;
   onSend: (text: string) => void;
+  onClose?: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -129,13 +131,19 @@ export function ChatPanel({
   };
 
   return (
-    <section className="flex h-full w-[26rem] shrink-0 flex-col border-l border-paper-300 bg-paper-50">
-      <header className="flex items-baseline justify-between px-5 py-4">
+    <section className="flex h-full w-full min-w-0 flex-col bg-paper-50">
+      <header className="flex min-h-12 items-center justify-between border-b border-paper-300 px-4">
         <h2 className="text-[13px] font-semibold tracking-tight text-ink-900">Conversation</h2>
-        <p className="text-[11px] text-ink-400">asks only what changes the answer</p>
+        <div className="flex items-center">
+          {onClose && (
+            <button type="button" onClick={onClose} className="flex h-11 w-11 items-center justify-center rounded-xl text-ink-400 hover:bg-paper-200 hover:text-ink-900 focus-visible:outline-2 focus-visible:outline-ember-500" aria-label="Close conversation panel">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden><path d="m2.5 2.5 9 9m0-9-9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+            </button>
+          )}
+        </div>
       </header>
 
-      <div className="flex-1 space-y-4 overflow-y-auto px-5 pb-4">
+      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
         {messages.length === 0 && (
           <div className="space-y-2">
             <p className="text-[12px] text-ink-500">Try one of the walkthrough scenarios:</p>
@@ -144,7 +152,7 @@ export function ChatPanel({
                 key={question.prompt}
                 onClick={() => onSend(question.prompt)}
                 disabled={busy}
-                className="block w-full rounded-xl border border-paper-300 bg-white px-3.5 py-3 text-left text-[13px] leading-[1.45] text-ink-700 transition hover:border-ember-300 hover:bg-ember-50 hover:text-ink-900 disabled:opacity-50"
+                className="block min-h-11 w-full rounded-lg border border-paper-300 bg-white px-3 py-2.5 text-left text-[12px] leading-[1.45] text-ink-700 transition hover:border-ember-300 hover:bg-ember-50 hover:text-ink-900 disabled:opacity-50"
               >
                 <span className="block">{question.prompt}</span>
                 <span className="mt-1 block text-[10.5px] text-ink-400">
@@ -196,8 +204,8 @@ export function ChatPanel({
         <div ref={bottomRef} />
       </div>
 
-      <div className="border-t border-paper-300 bg-paper-50 p-3">
-        <div className="rounded-2xl border border-paper-300 bg-white p-2 transition focus-within:border-ember-300 focus-within:ring-2 focus-within:ring-ember-100">
+      <div className="border-t border-paper-300 bg-paper-50 p-2.5">
+        <div className="rounded-xl border border-paper-300 bg-white p-1.5 transition focus-within:border-ember-300 focus-within:ring-2 focus-within:ring-ember-100">
           <textarea
             ref={textareaRef}
             value={draft}
@@ -210,7 +218,8 @@ export function ChatPanel({
             }}
             rows={1}
             placeholder="Describe what you need…"
-            className="block max-h-40 w-full resize-none bg-transparent px-2 pb-1.5 pt-1 text-[13px] leading-[1.55] text-ink-900 outline-none placeholder:text-ink-400"
+            aria-label="Describe the wildfire analysis you need"
+            className="block max-h-40 w-full resize-none bg-transparent px-2 pb-1.5 pt-1 text-base leading-[1.55] text-ink-900 outline-none placeholder:text-ink-400 lg:text-[13px]"
           />
           <div className="flex items-center justify-between gap-2">
             <ExpertisePicker
@@ -222,7 +231,7 @@ export function ChatPanel({
               onClick={submit}
               disabled={busy || !draft.trim()}
               aria-label="Send"
-              className="flex h-7 w-7 items-center justify-center rounded-lg bg-ember-500 text-white transition hover:bg-ember-600 disabled:bg-paper-300 disabled:text-ink-400"
+              className="flex h-11 w-11 items-center justify-center rounded-xl bg-ember-500 text-white transition hover:bg-ember-600 disabled:bg-paper-300 disabled:text-ink-400"
             >
               <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
                 <path

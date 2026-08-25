@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     #: One allow-listed root. The model sees only metadata with relative paths;
     #: trusted code performs the scan and validates every selected dataset id.
     local_data_root: Path = REPO_ROOT / "backend" / "data"
+    session_db_path: Path = REPO_ROOT / ".runtime" / "wildfire-sessions.sqlite3"
 
     # ── Service ─────────────────────────────────────────────────────
     #: Census Data API key. Free, but now required for every query - the old

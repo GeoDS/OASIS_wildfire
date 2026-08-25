@@ -221,10 +221,14 @@ export function MapView({
   resolved,
   layers,
   rasters,
+  activeLayerIds = [],
+  onLayerSelect,
 }: {
   resolved: ResolvedLocation | null;
   layers: LayerResult[];
   rasters: RasterLayerResult[];
+  activeLayerIds?: string[];
+  onLayerSelect?: (capabilityId: string | null, additive?: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -234,12 +238,10 @@ export function MapView({
   const sourceRef = useRef<string[]>([]);
   const rasterDrawnRef = useRef<string[]>([]);
   const layerMetaRef = useRef<Map<string, LayerResult>>(new Map());
-  const hasBottomRasterPanel = rasters.some(
-    (raster) =>
-      raster.variable === "active_fire" ||
-      raster.variable === "burned_area" ||
-      raster.variable.startsWith("ndvi_"),
-  );
+  const onLayerSelectRef = useRef(onLayerSelect);
+  useEffect(() => {
+    onLayerSelectRef.current = onLayerSelect;
+  }, [onLayerSelect]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -311,6 +313,7 @@ export function MapView({
         ];
       }
       if (!entries.length) return;
+      onLayerSelectRef.current?.(entries[0].layer.capability_id, event.originalEvent.shiftKey);
       popupRef.current?.remove();
       popupRef.current = new maplibregl.Popup({ closeButton: true, maxWidth: "320px" })
         .setLngLat(event.lngLat)
@@ -509,6 +512,22 @@ export function MapView({
     const map = mapRef.current;
     if (!map) return;
     const apply = () => {
+      for (const id of drawnRef.current) {
+        if (!map.getLayer(id)) continue;
+        const belongsToActive = activeLayerIds.length
+          ? activeLayerIds.some((activeLayerId) => id.startsWith(`result-${activeLayerId}`))
+          : true;
+        map.setLayoutProperty(id, "visibility", belongsToActive ? "visible" : "none");
+      }
+    };
+    if (readyRef.current) apply();
+    else map.once("load", apply);
+  }, [activeLayerIds, layers]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const apply = () => {
       for (const id of rasterDrawnRef.current) {
         if (map.getLayer(id)) map.removeLayer(id);
         if (map.getSource(id)) map.removeSource(id);
@@ -557,9 +576,7 @@ export function MapView({
         [bounds[2], bounds[3]],
       ],
       {
-        padding: hasBottomRasterPanel
-          ? { top: 24, right: 24, bottom: Math.min(210, canvas.clientHeight / 2), left: 24 }
-          : padding,
+        padding,
         duration: 700,
         maxZoom: 12,
       },
@@ -626,16 +643,13 @@ export function MapView({
 
       {(drawn.length > 0 || rasters.length > 0) && (
         <details
-          open={!hasBottomRasterPanel}
           className="animate-rise absolute right-4 top-4 z-20 max-h-[calc(100%-2rem)] w-[17rem] overflow-y-auto rounded-xl border border-paper-300 bg-white/95 p-3 shadow-sm backdrop-blur"
         >
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-sm focus-visible:outline-2 focus-visible:outline-ember-500">
             <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-400">
               Map legend
             </p>
-            <p className="text-[9.5px] text-ink-400">Click to hide/show</p>
           </summary>
-          <p className="mt-1 text-[9.5px] text-ink-400">Click map features for details</p>
           <ul className="mt-2 space-y-3">
             {drawn.map((layer) => {
               const visualization = layer.visualization;
@@ -644,8 +658,8 @@ export function MapView({
                 <li key={layer.capability_id} className="border-t border-paper-300 pt-2 first:border-0 first:pt-0">
                   <button
                     type="button"
-                    className="flex w-full items-start justify-between gap-2 text-left"
-                    title="Zoom to this layer"
+                    className="block w-full cursor-pointer rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ember-500"
+                    aria-label={`Zoom to ${layer.title}`}
                     onClick={() => {
                       const bounds = layerBounds(layer);
                       if (bounds) fitBounds(bounds);
@@ -653,10 +667,6 @@ export function MapView({
                   >
                     <span className="text-[11.5px] font-medium leading-tight text-ink-900">
                       {layer.title}
-                    </span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-ink-400">
-                      {layer.feature_count}
-                      {layer.truncated ? "+" : ""}
                     </span>
                   </button>
                   {visualization?.kind === "vector" ? (
@@ -672,7 +682,9 @@ export function MapView({
                     <div className="mt-1.5 space-y-1">
                       <p className="text-[9.5px] font-medium text-ink-500">
                         {visualization.label}
-                        {visualization.unit ? ` · ${visualization.unit}` : ""}
+                        {visualization.unit && !visualization.label.toLowerCase().includes(visualization.unit.toLowerCase())
+                          ? ` · ${visualization.unit}`
+                          : ""}
                       </p>
                       {visualization.stops.map((stop) => (
                         <div key={`${stop.value}-${stop.label}`} className="flex items-center gap-1.5">
@@ -697,9 +709,11 @@ export function MapView({
                       </span>
                     </div>
                   )}
-                  <p className="mt-1 text-[9.5px] leading-[1.35] text-ink-500">
-                    {visualization?.explanation ?? layer.caveat}
-                  </p>
+                  {visualization?.kind !== "fixed" && (visualization?.explanation ?? layer.caveat) && (
+                    <p className="mt-1 text-[9.5px] leading-[1.35] text-ink-500">
+                      {visualization?.explanation ?? layer.caveat}
+                    </p>
+                  )}
                   <p className="mt-0.5 truncate text-[9px] text-ink-400">
                     {layer.source}
                     {layer.as_of ? ` · ${layer.as_of}` : ""}

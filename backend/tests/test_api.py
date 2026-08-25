@@ -168,6 +168,37 @@ def test_unknown_session_is_rejected(client):
     assert resp.status_code == 404
 
 
+def test_session_archive_lists_restores_renames_and_deletes(client):
+    session_id = client.post("/api/sessions").json()["session_id"]
+    snapshot = {
+        "status": "complete",
+        "messages": [{"role": "user", "content": "Show the Bobcat Fire lifecycle"}],
+        "layers": [],
+    }
+    saved = client.put(
+        f"/api/sessions/{session_id}/snapshot",
+        json={"snapshot": snapshot},
+    )
+    assert saved.status_code == 200
+
+    listed = client.get("/api/sessions").json()["sessions"]
+    archived = next(item for item in listed if item["id"] == session_id)
+    assert archived["message_count"] == 1
+    assert archived["preview"] == "Show the Bobcat Fire lifecycle"
+
+    renamed = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"title": "Bobcat lifecycle"},
+    )
+    assert renamed.status_code == 200
+    restored = client.get(f"/api/sessions/{session_id}").json()
+    assert restored["title"] == "Bobcat lifecycle"
+    assert restored["snapshot"] == snapshot
+
+    assert client.delete(f"/api/sessions/{session_id}").status_code == 200
+    assert client.get(f"/api/sessions/{session_id}").status_code == 404
+
+
 def test_a_failure_after_the_graph_still_reaches_the_client(client, monkeypatch):
     """Rendering runs outside the graph loop; its failures must not kill the stream.
 

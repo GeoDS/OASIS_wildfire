@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { sendMessage } from "./api";
+import { saveSessionSnapshot, sendMessage } from "./api";
 
 /**
  * Regression: the SSE parser must accept CRLF.
@@ -70,5 +70,45 @@ describe("sendMessage SSE parsing", () => {
   it("returns non-JSON data as a string instead of throwing", async () => {
     const events = await collect(["event: note\r\ndata: plain text\r\n\r\n"]);
     expect(events).toEqual([{ event: "note", data: "plain text" }]);
+  });
+});
+
+describe("session archive", () => {
+  it("updates a workspace snapshot with PUT", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await saveSessionSnapshot("sid", {
+      status: "idle",
+      messages: [],
+      contract: null,
+      stages: {
+        requirement_understanding: "pending",
+        task_compiler: "pending",
+        ambiguity_resolution: "pending",
+        analysis_contract: "pending",
+        planning: "pending",
+        execution: "pending",
+      },
+      plan: null,
+      layers: [],
+      rasters: [],
+      fireDataStatus: null,
+      fireLifecycle: null,
+      spatialAnalysis: null,
+      fireContext: null,
+      analysisView: "difference",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/sessions/sid/snapshot",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    vi.unstubAllGlobals();
   });
 });

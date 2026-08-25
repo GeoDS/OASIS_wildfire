@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import re
-import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import date
@@ -94,6 +93,7 @@ from .raster_layers import (
     render_raster_preview,
 )
 from .request_intent import is_weather_only
+from .session_store import SessionStore
 from .taxonomy import (
     EXPERTISE_DEFINITIONS,
     HAZARD_OBJECTS,
@@ -119,7 +119,8 @@ logger = logging.getLogger(__name__)
 # In-process state. Swap in PostgresSaver plus real session storage for production.
 _checkpointer = MemorySaver(serde=make_serde())
 _graph = build_graph(_checkpointer)
-_sessions: set[str] = set()
+_session_store = SessionStore(settings.session_db_path)
+_sessions: set[str] = _session_store.ids()
 
 
 #: Short replies that plainly answer a yes/no without using either label.
@@ -286,6 +287,14 @@ class FireLifecycleIn(BaseModel):
     day: str | None = None
 
 
+class SessionSnapshotIn(BaseModel):
+    snapshot: dict[str, Any]
+
+
+class SessionRenameIn(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+
+
 def _archive_summary() -> list[dict[str, Any]]:
     """The local fire archive, small enough to ride every prompt.
 
@@ -402,6 +411,7 @@ def _remember_completed_analysis(
     context.remember("user", user_text)
     if summary:
         context.remember("agent", summary)
+    _session_store.save_context(session_id, context.model_dump(mode="json"))
 
 
 def _expertise_label(override: ExpertiseLevel | None) -> str:
@@ -546,11 +556,18 @@ def _public_layer_results(source: PublicSource, payload: dict) -> list[LayerResu
         layer_title = title
         if source == "weather" and geometry_type == "LineString":
             layer_title = "NWS derived downwind direction"
+        hazard_object = {
+            "weather": "weather",
+            "air_quality": "air_quality",
+            "hmsfire": "satellite_hotspot",
+            "wfigs": "fire_perimeter",
+            "fire_history": "fire_perimeter",
+        }[source]
         layers.append(
             LayerResult(
                 capability_id=f"public_{source}_{suffix}",
                 title=f"API · {layer_title}",
-                hazard_object="active_fire",
+                hazard_object=hazard_object,
                 family=family,
                 geometry_type=geometry_type,
                 caveat=metadata.get("caveat", "Public API result; inspect provenance."),
@@ -1194,7 +1211,7 @@ async def _automatic_fire_subject(fire_name: str, year: int) -> LayerResult | No
     return LayerResult(
         capability_id="subject_fire_perimeter",
         title=f"{fire_name} official perimeter",
-        hazard_object="active_fire",
+        hazard_object="fire_perimeter",
         family="official_fire_perimeters",
         geometry_type="Polygon",
         caveat=(
@@ -1311,7 +1328,7 @@ async def fire_lifecycle_asset(event_id: str, filename: str) -> FileResponse:
 
 @app.post("/api/sessions")
 async def create_session() -> dict:
-    session_id = str(uuid.uuid4())
+    session_id = _session_store.create()
     _sessions.add(session_id)
     context = ConversationContext()
     # Loaded once per session so "what fires do you have?" is a question the
@@ -1329,19 +1346,72 @@ async def create_session() -> dict:
     return {"session_id": session_id}
 
 
+@app.get("/api/sessions")
+async def list_sessions() -> dict:
+    return {"sessions": _session_store.list()}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str) -> dict:
+    archived = _session_store.get(session_id)
+    if archived is None:
+        raise HTTPException(404, "unknown session")
+    _sessions.add(session_id)
+    if session_id not in _session_contexts:
+        raw_context = _session_store.context(session_id)
+        _session_contexts[session_id] = (
+            ConversationContext.model_validate(raw_context)
+            if raw_context
+            else ConversationContext()
+        )
+    return archived
+
+
+@app.put("/api/sessions/{session_id}/snapshot")
+async def save_session_snapshot(session_id: str, body: SessionSnapshotIn) -> dict:
+    if not _session_store.save_snapshot(session_id, body.snapshot):
+        raise HTTPException(404, "unknown session")
+    return {"ok": True}
+
+
+@app.patch("/api/sessions/{session_id}")
+async def rename_session(session_id: str, body: SessionRenameIn) -> dict:
+    if not _session_store.rename(session_id, body.title):
+        raise HTTPException(404, "unknown session")
+    return {"ok": True}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict:
+    if not _session_store.delete(session_id):
+        raise HTTPException(404, "unknown session")
+    _sessions.discard(session_id)
+    _session_contexts.pop(session_id, None)
+    return {"ok": True}
+
+
 @app.post("/api/sessions/{session_id}/messages")
 async def post_message(session_id: str, body: MessageIn) -> EventSourceResponse:
     if session_id not in _sessions:
         raise HTTPException(404, "unknown session")
 
+    if session_id not in _session_contexts:
+        raw_context = _session_store.context(session_id)
+        _session_contexts[session_id] = (
+            ConversationContext.model_validate(raw_context)
+            if raw_context
+            else ConversationContext()
+        )
+
     ok, detail = check_llm_ready()
     if not ok:
         raise HTTPException(503, detail)
 
-    return EventSourceResponse(_guarded(_run(session_id, body)))
+    _session_store.touch_message(session_id, body.text)
+    return EventSourceResponse(_guarded(_run(session_id, body), session_id))
 
 
-async def _guarded(stream: AsyncIterator[dict]) -> AsyncIterator[dict]:
+async def _guarded(stream: AsyncIterator[dict], session_id: str) -> AsyncIterator[dict]:
     """Turn any escaping exception into a terminal `error` event.
 
     Only the graph loop inside `_run` used to be guarded. A failure in the
@@ -1352,8 +1422,10 @@ async def _guarded(stream: AsyncIterator[dict]) -> AsyncIterator[dict]:
     try:
         async for item in stream:
             yield item
+        _session_store.mark_status(session_id, "complete")
     except Exception as exc:
         logger.exception("session stream failed")
+        _session_store.mark_status(session_id, "failed")
         yield _sse("error", {"message": str(exc), "type": type(exc).__name__})
 
 
@@ -1981,6 +2053,7 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
                 return
             context.remember("user", body.text)
             context.remember("agent", answer)
+            _session_store.save_context(session_id, context.model_dump(mode="json"))
             yield _sse("summary", {"text": answer})
             return
 

@@ -66,10 +66,11 @@ export function ExpertisePicker({
   return (
     <div ref={rootRef} className="relative">
       <button
+        type="button"
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] text-ink-500 transition hover:bg-paper-200 hover:text-ink-900"
+        className="flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[12px] text-ink-500 transition hover:bg-paper-200 hover:text-ink-900 focus-visible:outline-2 focus-visible:outline-ember-500"
       >
         <span className="font-medium">{current?.label ?? "Auto"}</span>
         {!value && inferred && <span className="text-ink-400">· inferred</span>}
@@ -97,6 +98,7 @@ export function ExpertisePicker({
             const selected = value === level.id;
             return (
               <button
+                type="button"
                 key={level.id}
                 role="option"
                 aria-selected={selected}
@@ -104,7 +106,7 @@ export function ExpertisePicker({
                   onChange(level.id);
                   setOpen(false);
                 }}
-                className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition hover:bg-paper-100"
+                className="flex min-h-11 w-full cursor-pointer items-start gap-2.5 px-3 py-2.5 text-left transition hover:bg-paper-100 focus-visible:outline-2 focus-visible:outline-ember-500"
               >
                 <span
                   className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -131,11 +133,12 @@ export function ExpertisePicker({
           })}
 
           <button
+            type="button"
             onClick={() => {
               onChange(null);
               setOpen(false);
             }}
-            className="w-full border-t border-paper-200 px-3 py-2 text-left text-[12px] text-ink-500 transition hover:bg-paper-100"
+            className="min-h-11 w-full cursor-pointer border-t border-paper-200 px-3 py-2 text-left text-[12px] text-ink-500 transition hover:bg-paper-100 focus-visible:outline-2 focus-visible:outline-ember-500"
           >
             Let the agent infer
           </button>
