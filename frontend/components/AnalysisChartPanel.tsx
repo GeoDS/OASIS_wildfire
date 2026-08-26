@@ -28,6 +28,7 @@ export function AnalysisChartPanel({
   onLayerSelect,
   onDateChange,
   onViewChange,
+  onPanelClose,
 }: {
   layers: LayerResult[];
   lifecycle: FireLifecycle | null;
@@ -39,6 +40,7 @@ export function AnalysisChartPanel({
   onLayerSelect: (id: string | null, additive?: boolean) => void;
   onDateChange: (day: string) => void;
   onViewChange: (view: "before" | "after" | "difference") => void;
+  onPanelClose: () => void;
 }) {
   if (spatialAnalysis) {
     const stats = spatialAnalysis.statistics;
@@ -94,7 +96,7 @@ export function AnalysisChartPanel({
               onClick={() => onDateChange(point.date)}
               aria-label={`${point.date}: ${point.new_burned_km2} square kilometres newly mapped`}
               title={`${point.date}: ${point.new_burned_km2} km²`}
-              className={`min-w-2 flex-1 cursor-pointer rounded-t-sm transition-colors focus-visible:outline-2 focus-visible:outline-ember-500 ${point.date === lifecycle.selected_date ? "bg-ember-500" : "bg-[#d8ad58] hover:bg-[#c7983d]"}`}
+              className={`min-w-2 flex-1 cursor-pointer rounded-t-sm transition-colors focus-visible:outline-2 focus-visible:outline-ember-500 ${point.date === lifecycle.selected_date ? "bg-ember-500" : "bg-ember-300 hover:bg-ember-500"}`}
               style={{ height: `${Math.max(5, (point.new_burned_km2 / max) * 100)}%` }}
             />
           ))}
@@ -130,38 +132,27 @@ export function AnalysisChartPanel({
   const visibleLayers = layers.filter((layer) => layer.feature_count > 0);
   return (
     <section className="flex h-full min-h-0 flex-col overflow-y-auto bg-white p-3" aria-label="Map layer overview">
-      <header className="flex items-start justify-between gap-3 border-b border-paper-200 pb-2.5">
-        <div>
-          <h2 className="text-[14px] font-semibold text-ink-900">Map layers</h2>
-          <p className="mt-0.5 text-[10px] leading-4 text-ink-400">Click to focus · Shift-click to add layers.</p>
-        </div>
-        <span className="shrink-0 rounded-full bg-paper-100 px-2 py-1 text-[9.5px] font-medium tabular-nums text-ink-500">{activeLayerIds.length ? `${activeLayerIds.length} selected` : `${visibleLayers.length} visible`}</span>
+      <header className="flex items-center justify-between gap-3 border-b border-paper-200 pb-2">
+        <h2 className="text-[14px] font-semibold text-ink-900">Map Legend</h2>
+        <button type="button" onClick={onPanelClose} className="flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-lg text-ink-400 transition hover:bg-paper-100 hover:text-ink-900 focus-visible:outline-2 focus-visible:outline-ember-500 lg:h-8 lg:w-8" aria-label="Close map legend" title="Close map legend">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden><path d="m3 3 8 8m0-8-8 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+        </button>
       </header>
       {visibleLayers.length ? (
-        <div className="mt-2.5 space-y-1.5">
+        <div className="mt-2 space-y-0.5">
           {visibleLayers.map((layer) => {
             const selected = activeLayerIds.includes(layer.capability_id);
-            return <button key={layer.capability_id} type="button" onClick={(event) => onLayerSelect(layer.capability_id, event.shiftKey)} aria-pressed={selected} className={`grid min-h-14 w-full cursor-pointer grid-cols-[2rem_minmax(0,1fr)] items-start gap-2.5 rounded-lg border px-2.5 py-2.5 text-left transition focus-visible:outline-2 focus-visible:outline-ember-500 ${selected ? "border-ember-300 bg-ember-50" : "border-paper-300 hover:bg-paper-100"}`}>
-              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-paper-300 bg-white text-ember-600">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-                  {layer.geometry_type === "Point" ? <><circle cx="8" cy="7" r="2.25" stroke="currentColor" strokeWidth="1.4" /><path d="M8 13c2.3-2.7 3.4-4.6 3.4-6A3.4 3.4 0 0 0 4.6 7c0 1.4 1.1 3.3 3.4 6Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /></> : <><path d="m3 5 5-2 5 2v6l-5 2-5-2V5Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="m3 5 5 2 5-2M8 7v6" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /></>}
-                </svg>
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="flex flex-wrap items-start gap-x-1.5 gap-y-1">
-                  <span className="break-words text-[11.5px] font-medium leading-4 text-ink-900">{layer.title}</span>
-                  {selected && <span className="shrink-0 rounded-full bg-ember-100 px-1.5 py-0.5 text-[9px] font-medium leading-4 text-ember-600">Selected</span>}
-                </span>
-                <span className="mt-1 block break-words text-[9.5px] leading-4 text-ink-400">{layer.source}</span>
-              </span>
+            const label = layer.title.replace(/^API\s*·\s*/i, "");
+            return <button key={layer.capability_id} type="button" onClick={(event) => onLayerSelect(layer.capability_id, event.shiftKey)} aria-pressed={selected} className={`min-h-11 w-full cursor-pointer rounded-md px-2.5 py-2 text-left text-[11.5px] leading-4 transition focus-visible:outline-2 focus-visible:outline-ember-500 lg:min-h-9 ${selected ? "bg-ember-50 font-semibold text-ember-600" : "font-medium text-ink-700 hover:bg-paper-100 hover:text-ink-900"}`}>
+              {label}
             </button>;
           })}
         </div>
       ) : (
         <div className="mt-3 flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-paper-400 p-4 text-center">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" className="text-ink-300" aria-hidden><path d="m4 8 8-4 8 4-8 4-8-4Zm0 4 8 4 8-4M4 16l8 4 8-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
-          <p className="mt-2 text-[11px] font-medium text-ink-600">No map layers yet</p>
-          <p className="mt-1 max-w-52 text-[10px] leading-4 text-ink-400">Layer names and sources will appear after data is fetched.</p>
+          <p className="mt-2 text-[11px] font-medium text-ink-600">No legend items yet</p>
+          <p className="mt-1 max-w-52 text-[10px] leading-4 text-ink-400">Layer names will appear after data is fetched.</p>
         </div>
       )}
     </section>

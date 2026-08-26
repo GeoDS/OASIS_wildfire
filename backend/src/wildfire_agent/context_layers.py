@@ -355,7 +355,7 @@ def communities_intersecting_fire(fire_subject: LayerResult, fire_name: str) -> 
                 LegendStop(
                     value="intersects official fire perimeter",
                     label="Intersects official perimeter",
-                    color="#d9932b",
+                    color="#e0a13e",
                 )
             ],
             popup_fields=[
@@ -386,7 +386,7 @@ def _communities_intersecting_label_points(
         geometry_role = "burned_area_intersecting_place_boundary"
         source = "Derived from TS-SatFire BA labels × U.S. Census TIGER/Line 2025 Places"
         legend_label = "Intersects mapped burned area"
-        legend_color = "#d9932b"
+        legend_color = "#e0a13e"
         layer_label = "Cities overlapping mapped burned area"
         date_label = "BA date"
         pixel_label = "BA pixel centers"

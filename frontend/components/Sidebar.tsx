@@ -92,10 +92,10 @@ export function Sidebar({
           type="button"
           onClick={onReset}
           className={`flex min-h-11 w-full cursor-pointer items-center rounded-lg text-[11.5px] font-medium text-ink-900 transition hover:bg-paper-200 focus-visible:outline-2 focus-visible:outline-ember-500 ${collapsed ? "justify-center" : "gap-2 px-2"}`}
-          title="New analysis"
+          title="New Analysis"
         >
           <Icon name="new" />
-          {!collapsed && "New analysis"}
+          {!collapsed && "New Analysis"}
         </button>
         {!collapsed && (
           <label className="flex min-h-11 items-center gap-2 rounded-lg px-2 text-ink-400 transition hover:bg-paper-100 focus-within:bg-white focus-within:ring-2 focus-within:ring-ember-200">

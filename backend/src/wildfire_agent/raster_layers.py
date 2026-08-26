@@ -539,7 +539,7 @@ def render_fire_lifecycle(event_id: str, *, day: str | None = None) -> dict[str,
         (
             "active_fire",
             "Active fire label",
-            "#e05234",
+            "#c76e00",
             0.92,
             (
                 "Finite non-zero pixels in VIIRS_Day band 7 (AF) for this date. "
@@ -814,7 +814,7 @@ def fire_activity_footprint_layer(plan: FireRasterPlan) -> LayerResult | None:
         visualization=LayerVisualization(
             kind="fixed",
             label="Observed activity footprint",
-            color="#d47732",
+            color="#d98a21",
             popup_fields=[
                 PopupField(key="date", label="Observation date"),
                 PopupField(key="observationPixels", label="VIIRS pixels"),

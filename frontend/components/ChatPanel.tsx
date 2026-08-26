@@ -166,7 +166,7 @@ export function ChatPanel({
         {messages.map((msg, i) =>
           msg.role === "user" ? (
             <div key={i} className="animate-rise flex justify-end">
-              <p className="max-w-[85%] rounded-2xl rounded-br-md bg-ember-500 px-3.5 py-2 text-[13px] leading-[1.55] text-white">
+              <p className="max-w-[85%] rounded-2xl rounded-br-md bg-ember-600 px-3.5 py-2 text-[13px] leading-[1.55] text-white">
                 {msg.content}
               </p>
             </div>
@@ -231,9 +231,9 @@ export function ChatPanel({
               onClick={submit}
               disabled={busy || !draft.trim()}
               aria-label="Send"
-              className="flex h-11 w-11 items-center justify-center rounded-xl bg-ember-500 text-white transition hover:bg-ember-600 disabled:bg-paper-300 disabled:text-ink-400"
+              className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg bg-ember-500 text-white transition hover:bg-ember-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ember-500 disabled:cursor-default disabled:bg-paper-300 disabled:text-ink-400 lg:h-8 lg:w-8 lg:rounded-md"
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+              <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden>
                 <path
                   d="M7 11.5V2.5M7 2.5L3.2 6.3M7 2.5l3.8 3.8"
                   fill="none"

@@ -59,7 +59,7 @@ export function FireLifecyclePanel({
               <span className="h-2 w-3 rounded-[2px] bg-[#5b536c]" /> Cumulative BA label
             </span>
             <span className="flex items-center gap-1">
-              <span className="h-2 w-3 rounded-[2px] bg-[#e05234]" /> Active fire label
+              <span className="h-2 w-3 rounded-[2px] bg-ember-500" /> Active fire label
             </span>
           </div>
         </div>
@@ -104,7 +104,7 @@ export function FireLifecyclePanel({
               aria-label={`Select ${point.date}`}
               onClick={() => void onDateChange(point.date)}
               className={`min-w-[3px] flex-1 rounded-t-[2px] transition-colors ${
-                index === selectedIndex ? "bg-ember-500" : "bg-[#d8ad58] hover:bg-[#c7983d]"
+                index === selectedIndex ? "bg-ember-500" : "bg-ember-300 hover:bg-ember-500"
               }`}
               style={{ height: `${Math.max(8, (point.new_burned_km2 / maxGrowth) * 100)}%` }}
             />
@@ -130,7 +130,7 @@ export function FireLifecyclePanel({
           onChange={(event) =>
             void onDateChange(lifecycle.dates[Number(event.currentTarget.value)])
           }
-          className="min-w-0 flex-1 accent-[#c8613a]"
+          className="min-w-0 flex-1 accent-[#c76e00]"
         />
         <span className="w-16 text-right text-[9.5px] text-ink-400">
           {loading ? "Loading…" : `${selectedIndex + 1} / ${lifecycle.dates.length}`}

@@ -2,13 +2,13 @@
 @import "maplibre-gl/dist/maplibre-gl.css";
 
 /*
- * Palette: warm paper neutrals with a single ember accent.
+ * Palette: warm paper neutrals with a single amber accent.
  *
  * Two reasons for warm-over-cool. First, this is a document-shaped product -
  * the user is reading a contract take shape, not monitoring a control room, and
  * a paper ground reads as something you think with rather than something that
  * alarms you. Second, the one saturated colour is spent on wildfire itself, so
- * ember means "the hazard" everywhere and nothing else competes with it.
+ * amber means "the hazard" everywhere and nothing else competes with it.
  */
 @theme {
   --color-paper-50: #fdfcfa;
@@ -22,12 +22,12 @@
   --color-ink-500: #6b6862;
   --color-ink-400: #8c8880;
 
-  --color-ember-50: #fdf4f0;
-  --color-ember-100: #fae7de;
-  --color-ember-200: #f4d2c2;
-  --color-ember-300: #eda98a;
-  --color-ember-500: #c8613a;
-  --color-ember-600: #a94e2c;
+  --color-ember-50: #fef9f1;
+  --color-ember-100: #fbeedc;
+  --color-ember-200: #f4d7ad;
+  --color-ember-300: #e9b870;
+  --color-ember-500: #c76e00;
+  --color-ember-600: #935100;
 
   --color-sage-500: #5f7a5f;
   --color-sage-100: #eaf0e8;
@@ -102,6 +102,10 @@ body {
   font-size: 10px !important;
 }
 
+.map-hover-popup {
+  pointer-events: none;
+}
+
 @keyframes rise {
   from {
     opacity: 0;
@@ -143,6 +147,16 @@ body {
   border-bottom-width: 1px;
 }
 
+.analysis-visual-grid--single {
+  grid-template-rows: minmax(20rem, 1fr);
+  overflow: hidden;
+}
+
+.analysis-visual-grid--single .analysis-map-pane {
+  border-bottom-width: 0;
+  border-right-width: 0;
+}
+
 @container (min-width: 620px) {
   .pipeline-compact-summary {
     display: none;
@@ -163,6 +177,9 @@ body {
     grid-template-columns: minmax(0, 1.9fr) minmax(16rem, 0.78fr);
     grid-template-rows: minmax(0, 1fr);
     overflow: hidden;
+  }
+  .analysis-visual-grid--single {
+    grid-template-columns: minmax(0, 1fr);
   }
   .analysis-map-pane {
     border-bottom-width: 0;

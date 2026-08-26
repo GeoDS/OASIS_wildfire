@@ -11,15 +11,15 @@ const MAP_STYLE =
 const ALTADENA: [number, number] = [-118.1312, 34.1897];
 
 const LAYER_STYLE: Record<string, { color: string }> = {
-  official_fire_perimeters: { color: "#c8613a" },
-  satellite_hotspots: { color: "#d9932b" },
+  official_fire_perimeters: { color: "#c76e00" },
+  satellite_hotspots: { color: "#e09a36" },
   historical_fire_perimeters: { color: "#6b6862" },
   public_weather_point: { color: "#2f7ea5" },
   public_weather_linestring: { color: "#2f7ea5" },
   subject_city_boundary: { color: "#356f82" },
-  subject_fire_perimeter: { color: "#b84a2f" },
-  subject_fire_observed_footprint: { color: "#d47732" },
-  fire_intersecting_place_boundaries: { color: "#d9932b" },
+  subject_fire_perimeter: { color: "#935100" },
+  subject_fire_observed_footprint: { color: "#d98a21" },
+  fire_intersecting_place_boundaries: { color: "#e0a13e" },
 };
 const DEFAULT_STYLE = { color: "#8c8880" };
 const WIND_ARROW_IMAGE = "firescope-wind-arrow";
@@ -222,26 +222,22 @@ export function MapView({
   layers,
   rasters,
   activeLayerIds = [],
-  onLayerSelect,
 }: {
   resolved: ResolvedLocation | null;
   layers: LayerResult[];
   rasters: RasterLayerResult[];
   activeLayerIds?: string[];
-  onLayerSelect?: (capabilityId: string | null, additive?: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
+  const hoverPopupRef = useRef<maplibregl.Popup | null>(null);
+  const hoveredFeatureKeyRef = useRef("");
   const readyRef = useRef(false);
   const drawnRef = useRef<string[]>([]);
   const sourceRef = useRef<string[]>([]);
   const rasterDrawnRef = useRef<string[]>([]);
   const layerMetaRef = useRef<Map<string, LayerResult>>(new Map());
-  const onLayerSelectRef = useRef(onLayerSelect);
-  useEffect(() => {
-    onLayerSelectRef.current = onLayerSelect;
-  }, [onLayerSelect]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -252,17 +248,14 @@ export function MapView({
       zoom: 10,
       attributionControl: { compact: true },
     });
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-left");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
 
     const interactiveFeatures = (event: MapMouseEvent) => {
       const ids = drawnRef.current.filter((id) => map.getLayer(id));
       return ids.length ? map.queryRenderedFeatures(event.point, { layers: ids }) : [];
     };
-    const onMove = (event: MapMouseEvent) => {
-      map.getCanvas().style.cursor = interactiveFeatures(event).length ? "pointer" : "";
-    };
-    const onClick = (event: MapMouseEvent) => {
+    const entriesAt = (event: MapMouseEvent) => {
       const geometryPriority: Record<string, number> = {
         Point: 0,
         MultiPoint: 0,
@@ -276,7 +269,7 @@ export function MapView({
           (geometryPriority[first.geometry.type] ?? 3) -
           (geometryPriority[second.geometry.type] ?? 3),
       );
-      if (!features.length) return;
+      if (!features.length) return [];
       const selectedPriority = geometryPriority[features[0].geometry.type] ?? 3;
       const seen = new Set<string>();
       let entries = features
@@ -312,16 +305,61 @@ export function MapView({
           ),
         ];
       }
-      if (!entries.length) return;
-      onLayerSelectRef.current?.(entries[0].layer.capability_id, event.originalEvent.shiftKey);
-      popupRef.current?.remove();
-      popupRef.current = new maplibregl.Popup({ closeButton: true, maxWidth: "320px" })
+      return entries;
+    };
+    const clearHoverPopup = () => {
+      hoverPopupRef.current?.remove();
+      hoverPopupRef.current = null;
+      hoveredFeatureKeyRef.current = "";
+    };
+    const onMove = (event: MapMouseEvent) => {
+      const entries = entriesAt(event);
+      map.getCanvas().style.cursor = entries.length ? "pointer" : "";
+      if (!entries.length || popupRef.current) {
+        clearHoverPopup();
+        return;
+      }
+      const featureKey = JSON.stringify(
+        entries.map(({ layer, properties }) => [
+          layer.capability_id,
+          properties.id ?? properties.displayName ?? properties.name ?? properties.forecastTime ?? "",
+        ]),
+      );
+      if (featureKey === hoveredFeatureKeyRef.current) return;
+      clearHoverPopup();
+      hoveredFeatureKeyRef.current = featureKey;
+      hoverPopupRef.current = new maplibregl.Popup({
+        className: "map-hover-popup",
+        closeButton: false,
+        closeOnClick: false,
+        maxWidth: "320px",
+        offset: 12,
+      })
         .setLngLat(event.lngLat)
         .setDOMContent(combinedPopupContent(entries))
         .addTo(map);
     };
+    const onClick = (event: MapMouseEvent) => {
+      const entries = entriesAt(event);
+      if (!entries.length) return;
+      clearHoverPopup();
+      popupRef.current?.remove();
+      const popup = new maplibregl.Popup({ closeButton: true, maxWidth: "320px" })
+        .setLngLat(event.lngLat)
+        .setDOMContent(combinedPopupContent(entries))
+        .addTo(map);
+      popupRef.current = popup;
+      popup.on("close", () => {
+        if (popupRef.current === popup) popupRef.current = null;
+      });
+    };
+    const onCanvasLeave = () => {
+      map.getCanvas().style.cursor = "";
+      clearHoverPopup();
+    };
     map.on("mousemove", onMove);
     map.on("click", onClick);
+    map.getCanvas().addEventListener("mouseleave", onCanvasLeave);
     map.on("load", () => {
       if (!map.hasImage(WIND_ARROW_IMAGE)) {
         map.addImage(WIND_ARROW_IMAGE, windArrowImage(), { pixelRatio: 2 });
@@ -331,11 +369,16 @@ export function MapView({
     mapRef.current = map;
     return () => {
       popupRef.current?.remove();
+      hoverPopupRef.current?.remove();
       map.off("mousemove", onMove);
       map.off("click", onClick);
+      map.getCanvas().removeEventListener("mouseleave", onCanvasLeave);
       map.remove();
       mapRef.current = null;
       readyRef.current = false;
+      popupRef.current = null;
+      hoverPopupRef.current = null;
+      hoveredFeatureKeyRef.current = "";
     };
   }, []);
 
@@ -344,6 +387,9 @@ export function MapView({
     if (!map) return;
     const apply = () => {
       popupRef.current?.remove();
+      hoverPopupRef.current?.remove();
+      hoverPopupRef.current = null;
+      hoveredFeatureKeyRef.current = "";
       for (const id of [...drawnRef.current].reverse()) {
         if (map.getLayer(id)) map.removeLayer(id);
       }
@@ -745,7 +791,7 @@ export function MapView({
                   <div className="mt-1.5 flex items-center gap-1.5">
                     <span
                       className="h-2.5 w-4 shrink-0 rounded-[2px] border border-black/10"
-                      style={{ backgroundColor: raster.legend_color ?? "#c8613a" }}
+                      style={{ backgroundColor: raster.legend_color ?? "#c76e00" }}
                     />
                     <span className="text-[9.5px] text-ink-500">
                       {raster.legend_label ?? raster.variable_label ?? raster.variable}

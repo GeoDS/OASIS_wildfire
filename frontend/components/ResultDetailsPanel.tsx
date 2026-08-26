@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useRef, type KeyboardEvent, type PointerEvent } from "react";
 
-import { countLabel, shortDate } from "@/lib/presentation";
+import { shortDate } from "@/lib/presentation";
 import type {
   AnalysisContract,
   ExecutionPlan,
@@ -14,12 +14,12 @@ import type {
   SpatialAnalysis,
 } from "@/lib/types";
 
-type Tab = "summary" | "data" | "method" | "limits";
+export type ResultDetailsTab = "summary" | "data" | "method" | "limits";
 
-const TABS: Array<[Tab, string]> = [
+const TABS: Array<[ResultDetailsTab, string]> = [
   ["summary", "Result"],
   ["data", "Data"],
-  ["method", "How it was made"],
+  ["method", "Reasoning Process"],
   ["limits", "Limits"],
 ];
 
@@ -45,6 +45,8 @@ export function ResultDetailsPanel({
   height,
   onHeightChange,
   onResizingChange,
+  tab,
+  onTabChange,
   contract,
   plan,
   layers,
@@ -59,6 +61,8 @@ export function ResultDetailsPanel({
   height: number;
   onHeightChange: (height: number) => void;
   onResizingChange: (resizing: boolean) => void;
+  tab: ResultDetailsTab;
+  onTabChange: (tab: ResultDetailsTab) => void;
   contract: AnalysisContract | null;
   plan: ExecutionPlan | null;
   layers: LayerResult[];
@@ -68,7 +72,6 @@ export function ResultDetailsPanel({
   spatialAnalysis: SpatialAnalysis | null;
   fireContext: FireContext | null;
 }) {
-  const [tab, setTab] = useState<Tab>("summary");
   const drag = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const dragged = useRef(false);
   const limitations = useMemo(
@@ -151,7 +154,7 @@ export function ResultDetailsPanel({
               role="tab"
               aria-selected={tab === id}
               onClick={() => {
-                setTab(id);
+                onTabChange(id);
                 if (collapsed) onCollapsedChange(false);
               }}
               className={`min-h-11 shrink-0 cursor-pointer border-b-2 px-3 text-[11px] font-medium transition focus-visible:outline-2 focus-visible:outline-ember-500 ${tab === id ? "border-ember-500 text-ink-900" : "border-transparent text-ink-400 hover:text-ink-900"}`}
@@ -194,7 +197,7 @@ export function ResultDetailsPanel({
 
       {!collapsed && <div id="analysis-details-content" className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
         {tab === "summary" && (
-          <div className="grid gap-2.5 xl:grid-cols-[1.2fr_1fr]">
+          <div className="grid items-start gap-2.5 xl:grid-cols-[1.2fr_1fr]">
             <div>
               <p className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-400">Question understood as</p>
               <p className="mt-1 text-[12px] leading-[1.55] text-ink-700">
@@ -202,12 +205,9 @@ export function ResultDetailsPanel({
               </p>
               {fireDataStatus?.message && <p className="mt-2 rounded-lg bg-white p-2.5 text-[11px] leading-[1.5] text-ink-500">{fireDataStatus.message}</p>}
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="rounded-lg border border-paper-300 bg-white p-2.5"><p className="text-[9px] uppercase tracking-wide text-ink-400">Data sources</p><p className="mt-0.5 text-[15px] font-semibold tabular-nums text-ink-900">{layers.length + rasters.length}</p></div>
-              <div className="rounded-lg border border-paper-300 bg-white p-2.5"><p className="text-[9px] uppercase tracking-wide text-ink-400">Coverage</p><p className="mt-0.5 text-[10.5px] font-semibold text-ink-900">{coverage.length ? shortDate(coverage.sort()[0]) : lifecycle ? `${lifecycle.dates[0]}–${lifecycle.dates.at(-1)}` : "Not reported"}</p></div>
-              {layers.slice(0, 4).map((layer) => (
-                <div key={layer.capability_id} className="col-span-2 rounded-lg border border-paper-300 bg-white px-2.5 py-2"><p className="text-[11px] font-medium text-ink-900">{countLabel(layer)}</p><p className="mt-px text-[9px] text-ink-400">{layer.title}</p></div>
-              ))}
+            <div className="grid self-start grid-cols-2 gap-2">
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-paper-300 bg-white px-2.5 py-2"><p className="text-[9px] font-medium leading-none tracking-wide text-ink-400">Data Sources</p><p className="shrink-0 text-[12px] font-semibold leading-none tabular-nums text-ink-900">{layers.length + rasters.length}</p></div>
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-paper-300 bg-white px-2.5 py-2"><p className="text-[9px] font-medium leading-none tracking-wide text-ink-400">Coverage</p><p className="truncate text-[12px] font-semibold leading-none text-ink-900">{coverage.length ? shortDate(coverage.sort()[0]) : lifecycle ? `${lifecycle.dates[0]}–${lifecycle.dates.at(-1)}` : "Not reported"}</p></div>
               {spatialAnalysis && <div className="col-span-2 rounded-xl border border-paper-300 bg-white px-3 py-2.5"><p className="text-[11.5px] font-medium text-ink-900">{spatialAnalysis.statistics.valid_area_km2.toLocaleString()} km² with valid analysis values</p><p className="mt-0.5 text-[9.5px] text-ink-400">{spatialAnalysis.statistics.valid_pixels.toLocaleString()} valid raster pixels</p></div>}
             </div>
           </div>
@@ -215,16 +215,16 @@ export function ResultDetailsPanel({
 
         {tab === "data" && (
           <div className="space-y-2">
-            {layers.length === 0 && rasters.length === 0 ? <Empty>No data has been selected yet. Source, coverage, quality, and object counts will appear here.</Empty> : null}
+            {layers.length === 0 && rasters.length === 0 ? <Empty>No data has been selected yet. Source, coverage, retrieval, and quality details will appear here.</Empty> : null}
             {layers.map((layer) => (
               <article key={layer.capability_id} className="grid gap-3 rounded-xl border border-paper-300 bg-white p-3 md:grid-cols-[minmax(10rem,1fr)_2fr_auto]">
-                <div><h3 className="text-[11.5px] font-semibold text-ink-900">{layer.title}</h3><p className="mt-0.5 text-[10px] text-ink-500">{countLabel(layer)}</p></div>
+                <div><h3 className="text-[11.5px] font-semibold text-ink-900">{layer.title}</h3></div>
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[9.5px]"><div><dt className="text-ink-400">Source</dt><dd className="mt-0.5 text-ink-700">{layer.source}</dd></div><div><dt className="text-ink-400">Coverage</dt><dd className="mt-0.5 text-ink-700">{shortDate(layer.as_of)}</dd></div><div><dt className="text-ink-400">Retrieved</dt><dd className="mt-0.5 text-ink-700">{layer.retrieved_at ?? "Bundled snapshot"}</dd></div><div><dt className="text-ink-400">Geometry</dt><dd className="mt-0.5 text-ink-700">{layer.geometry_type}</dd></div></dl>
                 <span className={`self-start rounded-full px-2 py-1 text-[9px] font-medium ${layer.truncated ? "bg-ember-100 text-ember-600" : "bg-sage-100 text-sage-500"}`}>{layer.truncated ? "Partial" : "Loaded"}</span>
               </article>
             ))}
             {rasters.map((raster) => (
-              <article key={raster.id} className="grid gap-3 rounded-xl border border-paper-300 bg-white p-3 md:grid-cols-[minmax(10rem,1fr)_2fr_auto]"><div><h3 className="text-[11.5px] font-semibold text-ink-900">{raster.title}</h3><p className="mt-0.5 text-[10px] text-ink-500">Raster surface · band {raster.display_band}</p></div><dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[9.5px]"><div><dt className="text-ink-400">Dataset</dt><dd className="mt-0.5 text-ink-700">{raster.dataset_id}</dd></div><div><dt className="text-ink-400">Date</dt><dd className="mt-0.5 text-ink-700">{raster.date}</dd></div><div><dt className="text-ink-400">Mask</dt><dd className="mt-0.5 text-ink-700">{raster.mask}</dd></div><div><dt className="text-ink-400">Value range</dt><dd className="mt-0.5 text-ink-700">{raster.value_range.join("–")}</dd></div></dl><span className="self-start rounded-full bg-sage-100 px-2 py-1 text-[9px] font-medium text-sage-500">Rendered</span></article>
+              <article key={raster.id} className="grid gap-3 rounded-xl border border-paper-300 bg-white p-3 md:grid-cols-[minmax(10rem,1fr)_2fr_auto]"><div><h3 className="text-[11.5px] font-semibold text-ink-900">{raster.title}</h3><p className="mt-0.5 text-[10px] text-ink-500">Band {raster.display_band}</p></div><dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[9.5px]"><div><dt className="text-ink-400">Dataset</dt><dd className="mt-0.5 text-ink-700">{raster.dataset_id}</dd></div><div><dt className="text-ink-400">Date</dt><dd className="mt-0.5 text-ink-700">{raster.date}</dd></div><div><dt className="text-ink-400">Mask</dt><dd className="mt-0.5 text-ink-700">{raster.mask}</dd></div><div><dt className="text-ink-400">Value range</dt><dd className="mt-0.5 text-ink-700">{raster.value_range.join("–")}</dd></div></dl><span className="self-start rounded-full bg-sage-100 px-2 py-1 text-[9px] font-medium text-sage-500">Rendered</span></article>
             ))}
           </div>
         )}
@@ -235,7 +235,7 @@ export function ResultDetailsPanel({
               ["1", "Interpreted the request", contract?.restatement ?? contract?.original_request ?? "Waiting for a question"],
               ["2", "Resolved scope and assumptions", contract ? `${contract.filled_ratio * 100}% of required fields resolved; ${contract.assumptions.length} visible assumption(s).` : "No scope resolved yet."],
               ["3", "Selected evidence", plan?.layers.length ? plan.layers.map((item) => `${item.title}: ${item.reason}`).join(" · ") : `${layers.length + rasters.length} source(s) supplied the current view.`],
-              ["4", "Filtered and aligned", spatialAnalysis ? spatialAnalysis.operations.map((operation) => operation.type.replaceAll("_", " ")).join(" → ") : layers.length ? layers.map((layer) => `${countLabel(layer)} passed to the map`).join(" · ") : "No filtering result yet."],
+              ["4", "Filtered and aligned", spatialAnalysis ? spatialAnalysis.operations.map((operation) => operation.type.replaceAll("_", " ")).join(" → ") : layers.length ? `${layers.map((layer) => layer.title).join(" · ")} prepared for display.` : "No filtering result yet."],
               ["5", "Built the visible result", spatialAnalysis?.summary ?? fireContext?.summary ?? fireDataStatus?.message ?? "The map, chart, and data panel update from the same result payload."],
             ].map(([number, title, detail]) => (
               <article key={number} className="grid grid-cols-[2rem_1fr] gap-3 rounded-xl border border-paper-300 bg-white p-3"><span className="flex h-8 w-8 items-center justify-center rounded-full bg-ember-100 text-[11px] font-semibold text-ember-600">{number}</span><div><h3 className="text-[11.5px] font-semibold text-ink-900">{title}</h3><p className="mt-1 text-[10.5px] leading-[1.5] text-ink-500">{detail}</p></div></article>
