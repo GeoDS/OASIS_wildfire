@@ -1,0 +1,54 @@
+[project]
+name = "wildfire-agent"
+version = "0.1.0"
+description = "Wildfire Analyst Agent — Task 1: User Goal Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.60",
+    "langchain>=0.3.13",
+    "langchain-core>=0.3.28",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "httpx>=0.28",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "sse-starlette>=2.2",
+    "python-dotenv>=1.0",
+    "rich>=13.9",
+    "firescope-socal-mcp",
+    "pyshp>=2.3",
+]
+
+[tool.uv.sources]
+firescope-socal-mcp = { path = "../mcp", editable = true }
+
+[project.optional-dependencies]
+anthropic = ["langchain-anthropic>=0.3.0"]
+openai = ["langchain-openai>=0.2.14"]
+
+[project.scripts]
+wildfire = "wildfire_agent.cli:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wildfire_agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,43 @@
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+out/
+.pnpm-store/
+.runtime/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Next.js local env
+.env.local
+
+# TS incremental build cache
+*.tsbuildinfo
+
+# Secrets — never commit. Keep raw key drops out of the repo too.
+api.txt
+*.key
+*secret*
+*credentials*
+
+# Local working material: handoff memos, source briefs, scratch notes.
+# Not deliverables, and some contain private deployment URLs.
+_local/
