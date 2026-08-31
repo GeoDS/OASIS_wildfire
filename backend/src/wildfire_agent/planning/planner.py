@@ -27,7 +27,10 @@ from .capabilities import (
     SHOWCASE_AREA,
     Capability,
     capabilities_for,
+    is_served,
     missing_variables,
+    renderer_coverage_for,
+    unserved_variables,
 )
 from .models import ExecutionPlan, PlannedLayer, UnmetNeed
 
@@ -308,6 +311,60 @@ def validate_proposal(contract: AnalysisContract, proposal: PlanProposal) -> Exe
         )
 
     return ExecutionPlan(layers=layers, unmet=unmet, notes=notes)
+
+
+def deployment_unmet_needs(contract: AnalysisContract) -> list[UnmetNeed]:
+    """Capability gaps for a contract that the renderer path will answer.
+
+    A different question from the one `validate_proposal` answers, and the two
+    must not be confused. That one reports what a *chosen set of registry
+    layers* failed to carry, which is a fact about one plan. This reports what
+    *this deployment* cannot produce by any path, which is a fact about the
+    system - the answer walkthrough scenario 3 asks for, and the one the Limits
+    tab is meant to show.
+
+    It needs no model. That is what makes it affordable on a turn whose layer
+    selection is skipped entirely - see `nodes.planning`.
+    """
+    unmet: list[UnmetNeed] = []
+    for ho in contract.hazard_objects:
+        label = (HAZARD_OBJECTS[ho].label if ho in HAZARD_OBJECTS else ho).lower()
+
+        if not is_served(ho):
+            unmet.append(
+                UnmetNeed(
+                    hazard_object=ho,
+                    reason=(
+                        f"No data source in this deployment covers {label}. "
+                        f"The contract is complete; the capability is missing."
+                    ),
+                )
+            )
+            continue
+
+        absent = unserved_variables(ho)
+        if not absent:
+            continue
+
+        coverage = renderer_coverage_for(ho)
+        served_by = coverage.served_by if coverage else "the layers this deployment holds"
+        unmet.append(
+            UnmetNeed(
+                hazard_object=ho,
+                reason=(
+                    f"{label.capitalize()} is served by {served_by}, which does not "
+                    f"carry {', '.join(absent)}. Everything else the object needs is "
+                    f"available."
+                ),
+                missing_variables=absent,
+                # Nothing this deployment can reach supplies these, outside
+                # sources included - the approval-gated ones are already counted
+                # as coverage. Offering to fetch them would be an offer that
+                # cannot be honoured.
+                fillable_externally=False,
+            )
+        )
+    return unmet
 
 
 async def build_plan(contract: AnalysisContract) -> ExecutionPlan:

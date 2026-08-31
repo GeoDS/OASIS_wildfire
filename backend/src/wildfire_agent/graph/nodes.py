@@ -20,7 +20,7 @@ from ..contract import (
 )
 from ..geocoding import DEFAULT_BUFFER_KM, resolve_local_fire, resolve_location
 from ..llm import structured
-from ..planning import build_plan, execute, summarise
+from ..planning import ExecutionPlan, build_plan, deployment_unmet_needs, execute, summarise
 from ..request_intent import requests_fire
 from ..taxonomy import (
     HAZARD_OBJECTS,
@@ -376,12 +376,20 @@ def names_a_family(value: str | None, choices: list[DataFamilyChoice]) -> bool:
 
 
 def enforce_family_disambiguation(contract: AnalysisContract) -> list[DataFamilyChoice]:
-    """Resolve data-family choices deterministically or mark them blocking.
+    """Resolve every data-family choice deterministically. Nothing blocks here.
 
-    Active-fire evidence is chosen by backend policy so the fire remains the
-    user's subject and product names never become UI prerequisites. Other
-    genuinely different questions, such as smoke overhead versus air breathed
-    at a ground monitor, still require clarification.
+    Backend policy picks the evidence family so the hazard stays the user's
+    subject and product names never become UI prerequisites: a resident asking
+    whether their neighbourhood burned should not have to adjudicate WFIGS
+    against VIIRS before seeing a map. The choice is recorded as a visible,
+    retractable assumption instead of being asked - disclosure rather than
+    consent. `docs/01-taxonomy.md` section 5.5 has the reasoning and the cost.
+
+    This applies to *all* family choices, smoke included. An earlier version of
+    this docstring claimed plume-versus-monitor questions still interrupted;
+    they do not, and `test_smoke_family_is_also_selected_by_backend` asserts so.
+    Restoring the question for smoke would be worse than leaving it: no smoke
+    plume capability ships, so it would be a question with nothing behind it.
 
     Returns the choices that apply, so the clarification stage can render them.
     """
@@ -768,8 +776,24 @@ async def analysis_contract(state: GoalAgentState) -> dict:
 
 
 async def planning(state: GoalAgentState) -> dict:
-    """Choose which data layers answer the contract. LLM proposes, registry validates."""
+    """Choose which data layers answer the contract. LLM proposes, registry validates.
+
+    Except when the renderer path is going to answer instead. The registry holds
+    three layers pinned to Altadena, so on a question about another fire or
+    another place they are the wrong thing to draw - which is why `api._run`
+    suppresses them once the contract's location resolves. Selecting them anyway
+    spent a model call per turn on a result nobody saw.
+
+    What is still wanted from this stage is the capability gap, and that is a
+    lookup rather than a judgement. See `docs/03-planning-agent.md` section 5.
+    """
     contract: AnalysisContract = state["contract"]
+
+    spatial = contract.spatial()
+    if spatial is not None and spatial.resolved:
+        plan = ExecutionPlan(layers=[], unmet=deployment_unmet_needs(contract))
+        return {"plan": plan, "stage": "execution"}
+
     plan = await build_plan(contract)
     return {"plan": plan, "stage": "execution"}
 

@@ -34,6 +34,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .analyses import AnalysisMatch
 from .analyses import resolve as resolve_analysis
+from .capability_overview import overview_facts, suggestions_for
 from .config import settings
 from .context_layers import (
     city_context_status,
@@ -73,9 +74,9 @@ from .graph import build_graph
 from .graph.build import make_serde
 from .graph.state import STAGE_AGENTS, STAGE_LABELS
 from .llm import check_llm_ready, describe_llm, is_mock
-from .narration import discuss, narrate
+from .narration import describe_capabilities, discuss, narrate
 from .planning import CAPABILITIES, SHOWCASE_AREA, ExecutionPlan
-from .planning.capabilities import missing_variables
+from .planning.capabilities import is_served, missing_variables, unserved_variables
 from .planning.executor import clip_local_layer, validate_bbox
 from .planning.models import LayerResult, LayerVisualization, LegendStop, PopupField
 from .raster_layers import (
@@ -458,9 +459,15 @@ async def taxonomy() -> dict:
                 "label": ho.label,
                 "required_variables": list(ho.required_variables),
                 "dataset_families": list(ho.dataset_families),
+                # Registry capability ids, which is what dispatches a layer on
+                # the registry path. Deliberately *not* the answer to "can this
+                # deployment serve it": six hazard objects are served by the
+                # renderer path and hold no capability id at all.
                 "covered_by": sorted(
                     c.id for c in CAPABILITIES.values() if c.hazard_object == ho.id
                 ),
+                "served": is_served(ho.id),
+                "unserved_variables": list(unserved_variables(ho.id)),
                 "family_choices": [
                     {"id": c.id, "label": c.label, "caveat": c.caveat} for c in ho.family_choices
                 ],
@@ -488,6 +495,24 @@ async def taxonomy() -> dict:
             for c in CAPABILITIES.values()
         },
     }
+
+
+@app.get("/api/capabilities")
+async def capabilities() -> dict:
+    """What this deployment can be asked to do, as questions that work.
+
+    Served so the starter questions a user first sees come from the same
+    declaration the agent answers "what can you do" from. The frontend held its
+    own hardcoded trio, which is a second place for the list to be wrong: an
+    example whose wording no longer triggers its topic fails in front of the
+    user, and nothing in the build would have caught it.
+    """
+    try:
+        archive = _archive_summary()
+    except Exception:
+        logger.exception("could not summarise the local fire archive")
+        archive = []
+    return overview_facts(archive)
 
 
 @app.get("/api/schema/contract")
@@ -903,6 +928,50 @@ def _archive_kind(kind: str, text: str) -> str:
     question that is not about the archive keeps whatever the resolver decided.
     """
     return "discussion" if kind == "analysis" and _asks_archive_question(text) else kind
+
+
+#: Asking what the system is for. Anchored on the system as the object - "you",
+#: "this tool", "questions I can ask" - because the same verbs point at the
+#: domain just as often. "What can I do about the debris flow" is a question
+#: about a burn scar, and routing it here would answer a hazard question with a
+#: brochure.
+_CAPABILITY_RE = re.compile(
+    r"\b(?:"
+    # "do" with no object, or with the system as the object. Anchored to the end
+    # of the clause: "what can I do about the debris flow" is a hazard question.
+    r"what\s+(?:else\s+)?(?:can|could)\s+(?:i|we|you)\s+do"
+    r"(?:\s+(?:with|using)\s+(?:you|this|it|the\s+\w+))?\s*[?.!]*\s*$"
+    r"|what\s+do\s+you\s+do\b"
+    # Same anchor: "what can I ask about the Woolsey fire" is about a fire.
+    r"|what\s+(?:else\s+)?(?:can|could)\s+(?:i|we)\s+ask(?:\s+you)?\s*[?.!]*\s*$"
+    r"|what\s+(?:other\s+|kinds?\s+of\s+|sort\s+of\s+)?questions?\s+"
+    r"(?:can|could|should)\s+(?:i|we)\s+ask\b"
+    r"|what\s+(?:else\s+)?(?:can|could)\s+you\s+help\s+(?:me|us)?\s*with\b"
+    r"|how\s+(?:can|could)\s+you\s+help\b"
+    r"|what\s+are\s+you\s+(?:capable\s+of|able\s+to\s+do)\b"
+    r"|what\s+are\s+your\s+capabilit"
+    r"|what\s+(?:else\s+)?(?:can|could)\s+this\s+(?:system|tool|app|agent|thing)\s+do\b"
+    r"|who\s+are\s+you\b"
+    r"|what\s+is\s+this\s+(?:system|tool|app|agent|for)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _asks_capability_question(value: str) -> bool:
+    """A question about the system itself, not about a fire or a place.
+
+    The first thing a new user types, and the one question this handled worst.
+    One phrasing reached the discussion prompt, which is written for a result
+    already on screen, and trailed off into what was not displayed. Another ran
+    the whole pipeline and asked which geographic area to consider - an
+    interrogation in answer to "what can I do with you".
+
+    Narrow on purpose. It must not catch a question that merely sounds
+    self-referential: "what can I do about the debris flow risk" is about a burn
+    scar, and the trailing-anchor on the bare "do" branch is what keeps it out.
+    """
+    return bool(_CAPABILITY_RE.search(value.strip()))
 
 
 def _asks_post_fire_risk_question(value: str) -> bool:
@@ -2360,11 +2429,68 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
     snapshot = await _graph.aget_state(config)
     resuming = bool(snapshot.next) and bool(snapshot.tasks and snapshot.tasks[0].interrupts)
 
+    # A question about the system is not a question about a place, and it needs
+    # no model to establish that. Checked before `resolve_turn` for three
+    # reasons: it saves the call, it works under the mock provider where the
+    # resolver deliberately refuses to guess, and the answer must not depend on
+    # how a model happened to classify the turn. "What can I do with you" used
+    # to run the whole pipeline and reply by asking which area was meant.
+    if not resuming and _asks_capability_question(body.text):
+        yield _sse("turn", _turn_payload("discussion"))
+        context = _session_contexts.setdefault(session_id, ConversationContext())
+        try:
+            # An unreadable archive is a thinner answer, not a failed one: the
+            # topics stand on their own and the roster is what needs the files.
+            try:
+                archive = _archive_summary()
+            except Exception:
+                logger.exception("could not summarise the local fire archive")
+                archive = []
+            answer, examples = await describe_capabilities(
+                question=body.text,
+                facts=overview_facts(archive),
+                expertise=_expertise_label(body.expertise_override),
+            )
+        except Exception as exc:
+            logger.exception("capability overview failed")
+            yield _sse(
+                "error",
+                {
+                    "message": f"I could not describe what I can do. ({type(exc).__name__})",
+                    "type": type(exc).__name__,
+                },
+            )
+            return
+        context.remember("user", body.text)
+        context.remember("agent", answer)
+        _session_store.save_context(session_id, context.model_dump(mode="json"))
+        yield _sse("summary", {"text": answer})
+        # Offered after the answer, not instead of it. Deliberately not a
+        # `clarification`: nothing is being asked, and that event advances the
+        # pipeline stepper - lighting up a stage on a turn that ran nothing is
+        # exactly the mismatch the reasoning panel exists to prevent.
+        yield _sse(
+            "suggestions",
+            {"type": "suggestions", "items": suggestions_for(examples)},
+        )
+        return
+
     payload: dict | Command
+    # Assigned on both branches. It used to be set only where a new question is
+    # classified, and read unconditionally after the graph - so answering any
+    # clarification raised `UnboundLocalError` and the turn the user had just
+    # completed died with it. The human-in-the-loop path is the last place that
+    # should fail silently.
+    national = False
     if resuming:
         # Mid-clarification is still the same question; nothing is being replaced.
         yield _sse("turn", _turn_payload("analysis"))
         payload = Command(resume=body.text)
+        # And a national question that stopped to ask something is still a
+        # national question. The words that made it one are on the contract.
+        parked_contract = snapshot.values.get("contract")
+        if isinstance(parked_contract, AnalysisContract):
+            national = _asks_national_fire_question(parked_contract.original_request)
     else:
         context = _session_contexts.setdefault(session_id, ConversationContext())
         try:
@@ -2499,8 +2625,21 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
                     and latest_contract.spatial().resolved
                 )
                 plan = update.get("plan")
-                if isinstance(plan, ExecutionPlan) and not automatic_context:
-                    yield _sse("plan", plan.model_dump(mode="json"))
+                if isinstance(plan, ExecutionPlan):
+                    if not automatic_context:
+                        yield _sse("plan", plan.model_dump(mode="json"))
+                    elif plan.unmet:
+                        # The renderer path is answering, so the registry's
+                        # layer selection is not what gets drawn and must not be
+                        # reported as though it were. The capability gap is a
+                        # different matter: "this deployment cannot do that at
+                        # all" is the one thing this stage still owns, and
+                        # suppressing the whole event left it with no route to
+                        # the screen. Layers are stripped; `unmet` travels.
+                        yield _sse(
+                            "plan",
+                            plan.model_copy(update={"layers": []}).model_dump(mode="json"),
+                        )
 
                 # Layers carry full GeoJSON, so each goes out on its own event
                 # rather than in one payload the browser has to swallow whole.

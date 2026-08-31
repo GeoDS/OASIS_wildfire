@@ -2,7 +2,7 @@
 
 > The stage downstream of the Analysis Contract. It exists to prove the contract
 > is worth producing: everything here is driven by the contract and by nothing
-> else, and the one question Task 1 insisted on asking is what makes the layer
+> else, and the evidence family the contract settled is what makes the layer
 > selection unambiguous.
 
 ---
@@ -17,6 +17,11 @@ it is a separate pair of graph nodes that run *after* the contract is finished:
 … → analysis_contract ──(ready?)──→ planning → execution → END
                        └─(not ready)────────────────────→ END
 ```
+
+> **Read §5 before relying on this.** The graph above is accurate, but it is no
+> longer the whole downstream picture. A second path was built alongside it and
+> now carries most of what the system does. This section describes the registry
+> path; §5 describes both and says what governs each.
 
 Two consequences worth stating:
 
@@ -35,7 +40,7 @@ rules are enforced in code, not requested in the prompt:
 | Rule | Why |
 |---|---|
 | A `capability_id` outside the catalogue is dropped | A hallucinated source must never reach the map |
-| A layer whose family contradicts the contract's `target` is dropped | The user was interrupted specifically to make that choice |
+| A layer whose family contradicts the contract's `target` is dropped | `target` records a decision already taken and disclosed; a proposal does not get to quietly reverse it |
 | A layer whose temporality contradicts the request is dropped | "Since 2000" answered with today's perimeter is a different question |
 
 And two floors are added back:
@@ -71,7 +76,8 @@ a map for the first time. The confirmed perimeter is one polygon set an agency
 verified. The satellite layer is over a thousand thermal detections, some of
 them coarse GOES pixels, plainly spilling outside that perimeter. Choosing
 between them does not change the resolution of the answer — it changes the
-answer. That is the argument for asking the user, made visible.
+answer. That is why the choice is made by stated policy and disclosed rather
+than left to a model's judgement — `docs/01` §5.5.
 
 The historical layer carries the same family tag as the current perimeters,
 because it *is* agency-verified polygons; only `temporality` separates them.
@@ -102,9 +108,79 @@ cd backend && uv run python scripts/fetch_showcase_data.py
 
 ## 4. What is deliberately not here
 
-- No spread modelling, fuels, exposure, vulnerability, evacuation, or
-  suppression data. Those hazard objects exist in the taxonomy and are reported
-  as `UnmetNeed` when a contract declares them — which is the honest answer, and
-  the behaviour walkthrough scenario 3 was written to check.
-- No analysis beyond spatial clipping. The layers are drawn, not interpreted.
-  Ranking, exposure counts, and impact assessment belong to a later stage.
+Scoped to the **registry path**. Much of what this section once listed as absent
+has since been built on the renderer path instead — see §5 and `docs/01` §1.4.
+
+- No `evacuation` and no `suppression_resource`, on either path. Those hazard
+  objects exist in the taxonomy and are reported as `UnmetNeed` when a contract
+  declares them — the honest answer, and what walkthrough scenario 3 was written
+  to check. Both paths report it; see §5.
+- No `infrastructure` and no `critical_facility`. Both are plausible next steps:
+  the taxonomy already names the families, and neither needs a new archive.
+- On the registry path specifically, **no analysis beyond spatial clipping**. Its
+  three layers are drawn, not interpreted. Derived analysis — burn severity,
+  vegetation change, spread behaviour, community intersection with shares —
+  exists, but on the renderer path.
+
+## 5. Two downstream paths
+
+Recorded 2026-08-27. §§1–4 describe the registry path as though it were the only
+one. It is not, and the difference decides where a given answer's safety comes
+from.
+
+```
+contract (ready)
+   ├── registry path ──→ planning ──→ execution ──→ 3 Altadena snapshot layers
+   │                     LLM proposes, registry validates
+   └── renderer path ──→ _render_answer
+                            ├── plan_fire_raster hit  → _render_fire_event
+                            └── otherwise             → _render_city_context
+```
+
+| | Registry path | Renderer path |
+|---|---|---|
+| Entry | `nodes.planning` → `nodes.execution` | `api.py:_render_answer` |
+| Selection | Model proposes layers; `validate_proposal` drops what it may not do | `plan_fire_raster(contract)` matches the local archive deterministically; otherwise the place path runs |
+| Data | Three pinned Altadena snapshots | TS-SatFire archive, WFIGS, FIRMS, NWS, Open-Meteo, Census ACS, ArcGIS catalogue |
+| Covers | `active_fire` only | Everything in `docs/06` §§2–7 |
+| Governed by | The capability registry (§2) | The controls below |
+
+**What governs the renderer path.** It consults no registry, so the guarantees
+§2 provides have to come from somewhere else. Three things provide them:
+
+1. **A host allowlist, not a model-chosen URL.** `portals.py` permits HTTPS to
+   allow-listed hosts only. The model contributes a *search term*; it never
+   contributes an address. A suggested host that is not on the list is inert.
+2. **Deterministic local matching.** Which archived event a question refers to is
+   decided by `plan_fire_raster` and `resolve_local_fire` from the user's own
+   words, not by a model naming a file. An id that is not in the catalogue cannot
+   be reached.
+3. **Routing guards on the user's literal wording.** A model restatement cannot
+   turn a weather question into a fire-data request. See
+   `docs/07-runtime-routing.md`.
+
+**How a capability gap reaches the screen from either path.** The registry path
+reports one as `UnmetNeed` inside the plan it built. The renderer path has no
+plan to attach it to, so `planner.deployment_unmet_needs` answers the wider
+question directly: what nothing in this deployment can produce, by any path. It
+reads `CAPABILITIES` and `RENDERER_COVERAGE` and calls no model, which is why it
+is affordable on a turn whose layer selection is skipped entirely.
+
+The `plan` event carries it either way. When the renderer path is answering, the
+event goes out with its **layers stripped** — those layers are the registry's
+Altadena snapshots, they are not what was drawn, and reporting them as though
+they were would trade one dishonesty for another.
+
+> This was broken until 2026-08-27, and the fix had an order. The registry knew
+> only its three `active_fire` entries, so a gap report built on it would have
+> denied `exposure` in the same reply that had just fetched Census figures.
+> `RENDERER_COVERAGE` had to be declared first. README items 5–7 record all
+> three corrections.
+
+**Why it was built this way.** Extending the registry means declaring, per layer,
+a file path, a family, a temporality, and exactly which required variables it
+supplies. For a pinned snapshot that is a few lines. For a live source with an
+approval gate, a per-event archive with thirty bands, and a catalogue searched at
+request time, the schema does not fit without being redesigned. Writing renderers
+shipped the capabilities; the cost is that the registry stopped describing the
+system, and this section is the interest payment.

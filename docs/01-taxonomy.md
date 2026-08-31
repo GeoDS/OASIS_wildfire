@@ -13,7 +13,7 @@
 
 ---
 
-## 1. Hazard objects — thirteen, in three tiers
+## 1. Hazard objects — fourteen, in three tiers
 
 The tiering follows the shape a wildfire question always has: **hazard → receptor → action**. The
 framework's own example, `Active fire + Exposure + Evacuation`, takes exactly one from each tier.
@@ -52,24 +52,43 @@ required.
 
 ### 1.4 Coverage in this deployment
 
-Which hazard objects the shipped dataset can actually serve. The authoritative list is
-`backend/src/wildfire_agent/planning/capabilities.py`; this is a summary.
+Which hazard objects can actually be served, and **by which of the two downstream paths**.
+Both are declared in `backend/src/wildfire_agent/planning/capabilities.py`, and deliberately kept
+apart: `CAPABILITIES` drives layer dispatch on the registry path, while `RENDERER_COVERAGE` states
+what the other path serves without pretending to be a file that can be loaded. The separation is
+what lets `is_served` tell the truth while `missing_variables` keeps answering the different
+question the fetch offers depend on — what is absent from this answer *now*, which is why an
+offer is worth putting.
 
-| hazard object | Covered? | capability |
-|---|---|---|
-| `active_fire` | yes | `official_fire_perimeters`, `satellite_hotspots`, `historical_fire_perimeters` |
-| everything else | **no** | — |
+| hazard object | Registry path | Renderer path | What serves it |
+|---|---|---|---|
+| `active_fire` | **yes** | yes | `official_fire_perimeters`, `satellite_hotspots`, `historical_fire_perimeters`; live WFIGS and FIRMS; TS-SatFire AF/BA labels |
+| `fire_spread` | no | **yes** | Daily AF label differencing, direction and rate of advance |
+| `fire_weather` | no | **yes** | Per-event local fire-weather record; NWS for current conditions |
+| `fuel` | no | **yes** | ESRI_LULC land cover with terrain; NDVI from VIIRS reflectance |
+| `exposure` | no | **partly** | Census ACS at place level, on approval. Building footprints and WUI boundary remain unavailable from any source |
+| `vulnerability` | no | **partly** | ACS age structure, income, no-vehicle households, seniors living alone — place level only |
+| `post_fire_debris_flow` | no | **yes** | LA County Public Works hazard areas, fetched from a catalogue at request time. LA County only, and no rainfall threshold |
+| `ecological_asset` | no | **no** | — |
+| `smoke_plume` | no | partly | Open-Meteo air quality for current conditions. No plume extent; no historical air quality |
+| `infrastructure`, `critical_facility`, `evacuation`, `suppression_resource`, `mitigation_treatment` | no | **no** | — |
 
-> **Task 1 never consults this table.** It declares what is needed; the Planning Agent matches
+> **Task 1 never consults this table.** It declares what is needed; the downstream stage matches
 > that against real capability and reports the shortfall rather than inventing an answer around
 > it. That separation is what walkthrough scenario 3 was written to check, and it is why the
 > registry lives downstream — see `docs/03-planning-agent.md`.
+>
+> Both paths report it now. `planner.deployment_unmet_needs` answers the deployment-wide question —
+> what nothing here can produce — and it reaches the Limits tab even on turns whose layer selection
+> is skipped entirely. It is a lookup rather than a judgement, so it costs no model call.
 
 ### 1.5 Data families that are not interchangeable
 
 Some hazard objects are served by two families that answer *different questions*. Choosing wrongly
-does not degrade the answer, it invalidates it — so `target` cannot be defaulted while one of these
-is in play.
+does not degrade the answer, it invalidates it — so `target` is **decided by stated backend policy
+and disclosed as a retractable assumption**, never left to a silent default and never inherited from
+a model's restatement. It was originally a blocking question; §5.5 records why that changed and what
+it cost.
 
 | hazard object | Choice | What it costs you |
 |---|---|---|
@@ -79,7 +98,8 @@ is in play.
 | | Ground monitor air quality | What people actually breathe, but only at sparse stations |
 
 Declared on `DataFamilyChoice` in `taxonomy.py` and enforced by
-`nodes.enforce_family_disambiguation`. **This deliberately does not rely on the prompt** — see §5.4.
+`nodes.enforce_family_disambiguation`. **This deliberately does not rely on the prompt** — see §5.4
+for why it left the prompt, and §5.5 for why it stopped interrupting.
 
 ---
 
@@ -178,6 +198,9 @@ its grounds and what reversing it would cost.
 
 ### 5.1 Thirteen hazard objects; `vulnerability` stays separate from `exposure`
 
+> Fourteen since `post_fire_debris_flow` was added as a distinct cascading hazard with its own
+> required variables, rather than a facet of the fire. The reasoning below is unchanged.
+
 The framework's Assessment definition lists "hazard, **exposure**, **vulnerability**, impact, or
 risk" as peers — it already treats them as different things. It also holds up in practice: of the
 three ranking bases in walkthrough scenario 2, one needs exposure alone and another needs both.
@@ -224,8 +247,57 @@ and removing the single most important moment in the workflow.
 
 A domain fact that must hold on every run does not belong in a prompt. It now lives on
 `DataFamilyChoice` and is enforced by `nodes.enforce_family_disambiguation`; the model is left to
-phrase the question, not to remember that a question is required. Regression tests:
-`backend/tests/test_disambiguation.py`.
+phrase the question, not to remember that a question is required.
+
+> The enforcement stayed in code. What later changed is how *strongly* it is enforced — see §5.5.
+> `backend/tests/test_disambiguation.py` is still the regression suite, but it now asserts the
+> behaviour described there rather than the blocking question described here.
+
+### 5.5 The family rule was relaxed from asking to disclosing
+
+Recorded 2026-08-27, after an audit found the docs and the code had diverged on the single most
+visible behaviour in the system.
+
+**What §5.4 built.** `target` became blocking whenever a non-interchangeable family was in play, so
+the run stopped and asked: *confirmed perimeters, or satellite thermal detections?* That question was
+the project's showcase moment.
+
+**What it cost in practice.** The question demands product literacy as the price of a first map. A
+resident asking whether their neighbourhood burned is asked to adjudicate WFIGS against VIIRS before
+being shown anything at all — and the framework's own instruction is to ask only when the role
+materially changes the analysis (§3, rule 3). It also made the fire stop being the subject of the
+conversation: the first thing the system said back was about data products.
+
+**What replaced it.** `enforce_family_disambiguation` now resolves the choice deterministically and
+never blocks, in three ordered branches:
+
+| Branch | Condition | Result | Confidence |
+|---|---|---|---|
+| 1 | The request names a family in its own words | That family, unchanged | — |
+| 2 | The request names an event in the local TS-SatFire subset | AF + BA historical labels, stated explicitly | 0.99 |
+| 3 | Otherwise | Satellite detections if the wording asks for heat, hotspots or near-real-time observation; **confirmed perimeters** otherwise | 0.82 |
+
+Branch 2 exists so a lifecycle view is never allowed to pass for an official perimeter. Branch 3's
+default is deliberately the conservative one: an unqualified fire question is answered with verified
+polygons, and the timely-but-unverified product is opted into by wording, not stumbled into.
+
+Every branch writes a visible assumption — `"Fire evidence selected automatically: …"` — which the
+user can retract. **The guarantee moved from consent to disclosure.**
+
+**What this costs, stated plainly.** Branch 3 is a keyword test, so it is sensitive to rewording in a
+way a blocking question was not. Two paraphrases of the same intent can select different evidence,
+and the only signal is one assumption line the user may not read. This is the same class of mechanism
+as the routing guards in `docs/07-runtime-routing.md`, and it carries the same class of risk. Anyone
+changing branch 3's keywords should treat it as changing an answer, not a phrasing.
+
+**Reversal cost:** low in code — restore `is_blocking` on `target` — but it re-imposes the literacy
+requirement, and three tests in `test_disambiguation.py` assert the current behaviour.
+
+**This applies to smoke too.** The docstring on `enforce_family_disambiguation` claimed until
+2026-08-27 that plume-versus-monitor questions still interrupted. They never did once branch 3
+existed, and `test_smoke_family_is_also_selected_by_backend` asserts as much. The comment was
+corrected rather than the behaviour: restoring the question for smoke would be worse, because no
+smoke plume capability ships and it would be a question with nothing behind it.
 
 ---
 
@@ -234,5 +306,7 @@ phrase the question, not to remember that a question is required. Regression tes
 Neither blocks implementation:
 
 - Competition scoring criteria and deadline — affects prioritisation, not the schema.
-- Which hazard object to cover next. Only `active_fire` has data today, so assessment and
-  decision-support questions currently report as unavailable — correct, but limiting.
+- Which hazard object to cover next. Seven of the thirteen are now served to some degree (§1.4), so
+  the limiting factor has moved: assessment questions are answerable, but `exposure` stops at
+  Census place level, and decision support still lacks `evacuation` and `infrastructure`. A
+  parcel-level damage or building-footprint layer would unlock the most.

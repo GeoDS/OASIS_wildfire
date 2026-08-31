@@ -18,6 +18,7 @@ import type {
   RasterLayerResult,
   ArchivedSession,
   SessionSummary,
+  CapabilitiesPayload,
   Taxonomy,
   WorkspaceSnapshot,
 } from "./types";
@@ -41,6 +42,7 @@ async function getJson<T>(path: string): Promise<T> {
 
 export const getHealth = () => getJson<Health>("/api/health");
 export const getTaxonomy = () => getJson<Taxonomy>("/api/taxonomy");
+export const getCapabilities = () => getJson<CapabilitiesPayload>("/api/capabilities");
 
 export interface PublicLayerRequest {
   source: PublicSource;

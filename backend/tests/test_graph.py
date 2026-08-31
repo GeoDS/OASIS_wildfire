@@ -546,3 +546,105 @@ class TestASingleOptionIsNotAQuestion:
 
         assert contract.slots["time_horizon"].value == "2020-09-27"
         assert contract.assumptions == []
+
+
+class TestPlanningSkipsTheDiscardedModelCall:
+    """The registry's three layers are pinned to Altadena.
+
+    Once the contract's location resolves, `api._run` suppresses them rather
+    than drawing January's Eaton snapshot over a question about another fire.
+    Selecting them anyway cost a model call per turn whose result nobody saw.
+    """
+
+    async def test_a_resolved_location_skips_layer_selection_entirely(self, monkeypatch):
+        from wildfire_agent.contract import (
+            AnalysisContract,
+            ResolvedLocation,
+            ScalarSlot,
+            SpatialSlot,
+        )
+        from wildfire_agent.graph import nodes
+
+        async def fail(*_args, **_kwargs):
+            raise AssertionError("build_plan was called on a turn the renderers answer")
+
+        monkeypatch.setattr(nodes, "build_plan", fail)
+
+        contract = AnalysisContract(
+            original_request="Show the Woolsey fire on 2018-11-16.",
+            hazard_objects=["active_fire"],
+            slots={
+                "location": SpatialSlot(
+                    value="Malibu, CA",
+                    resolved=ResolvedLocation(
+                        center=(-118.80, 34.12), buffer_km=25, bbox=(-119.1, 34.0, -118.5, 34.3)
+                    ),
+                ),
+                "target": ScalarSlot(value="official_fire_perimeters"),
+            },
+        )
+
+        result = await nodes.planning({"contract": contract})
+
+        assert result["plan"].layers == []
+        # Active fire is fully served across the two paths, so silence here is
+        # the correct answer rather than a missing one.
+        assert result["plan"].unmet == []
+
+    async def test_an_unresolved_location_still_runs_the_planner(self, monkeypatch):
+        """The registry path is not deleted, only bypassed where it is moot."""
+        from wildfire_agent.contract import AnalysisContract, ScalarSlot, SpatialSlot
+        from wildfire_agent.graph import nodes
+        from wildfire_agent.planning import ExecutionPlan
+
+        called = []
+
+        async def fake_build_plan(contract):
+            called.append(contract)
+            return ExecutionPlan()
+
+        monkeypatch.setattr(nodes, "build_plan", fake_build_plan)
+
+        contract = AnalysisContract(
+            original_request="Where are the active fires?",
+            hazard_objects=["active_fire"],
+            slots={
+                "location": SpatialSlot(value="somewhere", resolved=None),
+                "target": ScalarSlot(value="official_fire_perimeters"),
+            },
+        )
+
+        await nodes.planning({"contract": contract})
+        assert called
+
+    async def test_a_capability_gap_survives_the_skip(self, monkeypatch):
+        """The one thing this stage still owns on the renderer path.
+
+        Suppressing the whole plan event left `UnmetNeed` with no route to the
+        screen, which is the honesty `docs/02` scenario 3 exists to check.
+        """
+        from wildfire_agent.contract import (
+            AnalysisContract,
+            ResolvedLocation,
+            ScalarSlot,
+            SpatialSlot,
+        )
+        from wildfire_agent.graph import nodes
+
+        contract = AnalysisContract(
+            original_request="Where should people evacuate to?",
+            hazard_objects=["active_fire", "evacuation"],
+            slots={
+                "location": SpatialSlot(
+                    value="Altadena, CA",
+                    resolved=ResolvedLocation(
+                        center=(-118.13, 34.19), buffer_km=15, bbox=(-118.3, 34.1, -117.9, 34.3)
+                    ),
+                ),
+                "target": ScalarSlot(value="official_fire_perimeters"),
+            },
+        )
+
+        result = await nodes.planning({"contract": contract})
+
+        assert [u.hazard_object for u in result["plan"].unmet] == ["evacuation"]

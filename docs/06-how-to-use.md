@@ -35,6 +35,61 @@ Three behaviours run through everything:
 
 ---
 
+## Start here · What can I ask you?
+
+**Ask**
+```
+What can you do?
+What can I do with you?
+What else can I ask you?
+How can you help me?
+Who are you?
+```
+
+**Does** — Answers from a declared inventory of topics, the archive roster, and
+which sources need approval. No pipeline runs, nothing is geocoded, and the map
+is left exactly as it was — so asking it mid-session does not cost you the
+result you are looking at.
+
+**Data** — `capability_overview.TOPICS` for the topics, the local TS-SatFire
+catalogue for the roster, `RENDERER_COVERAGE` for the approval-gated sources.
+Only the topics are hand-declared; the rest is derived, so the roster cannot go
+stale.
+
+**Result** — Two or three example questions in wording that is known to work,
+the archive as a fixed set with its count, and a plain statement that some
+sources are fetched only after you approve them. Example fires are drawn only
+from events that carry burned-area labels: offering Thomas as a starting point
+would send you to an event that cannot answer most of these questions.
+
+**The same examples are then offered as options.** A `suggestions` event follows
+the answer, carrying exactly the questions the reply quoted — the reply reports
+which ones it used, and each is checked against the declared list before being
+offered. Prose you have to retype; an option is one click from being sent, so
+wording that does not trigger its topic would fail in front of you. Nothing that
+was not declared can be offered, and if the reply named nothing usable the menu
+falls back to three that always work rather than appearing empty.
+
+It is deliberately **not** a `clarification`. Nothing is being asked, and that
+event advances the pipeline stepper — lighting up a stage on a turn that ran
+nothing is the mismatch the Reasoning Process tab exists to prevent.
+
+The same declaration is served at `GET /api/capabilities`, so the starter
+questions shown on an empty conversation can come from the list the agent
+answers from rather than a second copy.
+
+**Why it is routed deterministically.** *"What can you do?"* used to reach the
+discussion prompt, which is written for a result already on screen, and trailed
+off into what was not displayed. *"What can I do with you?"* ran the whole
+pipeline and replied by asking which geographic area was meant. The check reads
+the user's own words before the resolver is consulted — so the answer does not
+depend on how a model classified the turn, and it works under the mock provider.
+
+**Deliberately narrow.** *"What can I do about the debris flow risk?"* is a
+question about a burn scar and goes to §5, not here.
+
+---
+
 ## 1 · What is burning right now, nationally
 
 **Ask**

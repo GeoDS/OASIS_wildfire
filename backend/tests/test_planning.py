@@ -356,3 +356,112 @@ class TestLocalLayersAreNamedToo:
             assert "affected" not in singular and "affected" not in plural
         for singular, plural in executor._CAPABILITY_NOUNS.values():
             assert "affected" not in singular and "affected" not in plural
+
+
+class TestRendererCoverage:
+    """What the *renderer* path serves, declared so the registry stops lying.
+
+    The registry holds three Altadena snapshots and dispatches one path. Six
+    hazard objects are served by the other path, and until they were declared
+    `capabilities_for` answered "nothing" for every one of them. Any honest gap
+    report built on that answer would have denied a capability in the same reply
+    that had just exercised it.
+    """
+
+    def test_a_hazard_object_only_the_renderers_serve_counts_as_served(self):
+        from wildfire_agent.planning.capabilities import capabilities_for, is_served
+
+        # The registry genuinely has nothing for these; the system genuinely
+        # answers them. Both statements have to stay true at once.
+        for hazard_object in ("fire_spread", "fire_weather", "fuel", "exposure"):
+            assert capabilities_for(hazard_object) == []
+            assert is_served(hazard_object) is True
+
+    def test_a_hazard_object_nothing_serves_is_still_unserved(self):
+        from wildfire_agent.planning.capabilities import is_served
+
+        for hazard_object in ("evacuation", "suppression_resource", "infrastructure"):
+            assert is_served(hazard_object) is False
+
+    def test_coverage_is_declared_strictly_rather_than_by_the_source_name(self):
+        """Over-declaring here turns a real gap into a silent one.
+
+        Land cover gives a vegetation type. It does not give a fuel model, and a
+        deployment that claimed otherwise would answer a fuels question with
+        something that is not one.
+        """
+        from wildfire_agent.planning.capabilities import unserved_variables
+
+        absent = unserved_variables("fuel")
+        assert "vegetation type" not in absent
+        assert {"fuel model", "fuel load", "fuel moisture"} <= set(absent)
+
+    def test_the_exposure_gap_matches_what_the_fetch_record_already_says(self):
+        """Two channels, one answer.
+
+        The fetch record tells the user "still unavailable from any source:
+        building footprints, WUI boundary". The capability gap must not say
+        something different about the same deployment.
+        """
+        from wildfire_agent.planning.capabilities import unserved_variables
+
+        assert set(unserved_variables("exposure")) == {"building footprints", "WUI boundary"}
+        assert "population count" not in unserved_variables("exposure")
+
+    def test_approval_gated_coverage_is_still_coverage(self):
+        """"We can get this if you allow it" is not "we cannot do this".
+
+        Census attributes are missing from an answer until the user approves the
+        fetch, which is what `missing_variables` reports and what makes the offer
+        worth putting. They are not a capability gap, and reporting them as one
+        would talk the user out of a question the system can answer.
+        """
+        from wildfire_agent.planning.capabilities import (
+            is_served,
+            missing_variables,
+            renderer_coverage_for,
+        )
+
+        assert renderer_coverage_for("exposure").needs_approval is True
+        assert is_served("exposure") is True
+        # The offer logic still sees the gap it needs to see.
+        assert "population count" in missing_variables("exposure")
+
+
+class TestDeploymentUnmetNeeds:
+    """The gap report for a turn the renderer path answers.
+
+    `validate_proposal` reports what one chosen set of registry layers failed to
+    carry. This reports what the deployment cannot produce by any path. They are
+    different questions and they must not converge.
+    """
+
+    def test_a_hazard_object_no_path_serves_is_reported_wholesale(self):
+        from wildfire_agent.planning.planner import deployment_unmet_needs
+
+        contract = _contract(hazards=["active_fire", "evacuation"])
+        by_object = {u.hazard_object: u for u in deployment_unmet_needs(contract)}
+
+        assert "evacuation" in by_object
+        assert by_object["evacuation"].missing_variables == ()
+        assert "No data source in this deployment covers" in by_object["evacuation"].reason
+
+    def test_a_hazard_object_the_renderers_fully_serve_is_not_reported(self):
+        """The whole point. Active fire is answered every day on this path, and
+        the registry's silence about it must not become a denial."""
+        from wildfire_agent.planning.planner import deployment_unmet_needs
+
+        contract = _contract(hazards=["active_fire"])
+        assert deployment_unmet_needs(contract) == []
+
+    def test_a_partial_gap_names_the_variables_and_the_source_that_lacks_them(self):
+        from wildfire_agent.planning.planner import deployment_unmet_needs
+
+        contract = _contract(hazards=["fire_weather"])
+        (gap,) = deployment_unmet_needs(contract)
+
+        assert gap.missing_variables == ("fire danger index",)
+        assert "fire-weather record" in gap.reason
+        # Nothing reachable supplies it, approval-gated sources included, so an
+        # offer to fetch it would be an offer that cannot be honoured.
+        assert gap.fillable_externally is False

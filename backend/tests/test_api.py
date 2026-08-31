@@ -1462,3 +1462,357 @@ def test_the_suite_never_touches_the_real_session_database():
 
     assert api._session_store.path != settings.session_db_path
     assert ".runtime" not in str(api._session_store.path)
+
+
+def test_taxonomy_separates_registry_dispatch_from_what_can_be_served(client):
+    """`covered_by` answers "which capability id draws this", and six hazard
+    objects the system serves every day have none. Answering "can this
+    deployment serve it" from that field understated the deployment by six."""
+    body = client.get("/api/taxonomy").json()
+
+    spread = body["hazard_objects"]["fire_spread"]
+    assert spread["covered_by"] == []
+    assert spread["served"] is True
+
+    evacuation = body["hazard_objects"]["evacuation"]
+    assert evacuation["covered_by"] == []
+    assert evacuation["served"] is False
+
+    # And what is served only partly says which variables it still lacks.
+    assert body["hazard_objects"]["exposure"]["unserved_variables"] == [
+        "building footprints",
+        "WUI boundary",
+    ]
+
+
+def test_a_capability_gap_reaches_the_client_on_the_renderer_path(client, monkeypatch):
+    """The Limits tab reads `plan.unmet`, and the plan event is suppressed once a
+    location resolves - so on the path users actually take, "this deployment
+    cannot do that at all" had nowhere to appear. Layers stay suppressed, since
+    the registry's Altadena snapshots are not what gets drawn; the gap travels.
+    """
+    from wildfire_agent.graph.models import (
+        ClarificationBatch,
+        ClarificationInterpretation,
+        CompiledTask,
+        RequirementUnderstanding,
+    )
+    from wildfire_agent.planning.planner import PlanProposal
+
+    understanding = _understanding()
+    understanding.hazard_objects = ["active_fire", "evacuation"]
+    responses = {
+        RequirementUnderstanding: understanding,
+        CompiledTask: _compiled(),
+        ClarificationBatch: _batch(),
+        ClarificationInterpretation: _interpretation(),
+        PlanProposal: _plan_proposal(),
+    }
+    monkeypatch.setattr(
+        "wildfire_agent.graph.nodes.structured",
+        lambda schema, **_k: _StubRunnable(responses[schema]),
+    )
+
+    session_id = client.post("/api/sessions").json()["session_id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"text": "Where should people near Altadena evacuate to?"},
+    )
+
+    plans = [d for e, d in _events(response) if e == "plan"]
+    assert plans, "the capability gap never reached the client"
+    plan = plans[-1]
+    assert [u["hazard_object"] for u in plan["unmet"]] == ["evacuation"]
+    assert plan["layers"] == []
+
+
+def test_answering_a_clarification_does_not_crash_the_turn(client, monkeypatch):
+    """`national` was assigned only where a *new* question is classified, and
+    read unconditionally after the graph. Every clarification answer therefore
+    died with an UnboundLocalError after the user had already done the work of
+    answering - the one path in the system that must not fail quietly."""
+    from wildfire_agent.graph.models import (
+        ClarificationBatch,
+        ClarificationInterpretation,
+        CompiledTask,
+        RequirementUnderstanding,
+        SlotUpdate,
+    )
+    from wildfire_agent.planning.planner import PlanProposal
+
+    understanding = _understanding()
+    understanding.hazard_objects = ["active_fire", "evacuation"]
+    # Decision support blocks on `comparison_basis`, which nothing fills - so
+    # the graph genuinely parks on an interrupt and the next message resumes it.
+    understanding.task_intent = ["decision_support"]
+    # The answer settles it, so the resumed run finishes the graph and reaches
+    # the code after it. A resume that merely re-asks never gets that far, and
+    # would not have caught this.
+    interpretation = ClarificationInterpretation(
+        updates=[
+            SlotUpdate(slot="location", value="10 km buffer around Altadena, CA"),
+            SlotUpdate(slot="target", value="official_fire_perimeters"),
+            SlotUpdate(slot="comparison_basis", value="by exposed population"),
+        ]
+    )
+    responses = {
+        RequirementUnderstanding: understanding,
+        CompiledTask: _compiled(),
+        ClarificationBatch: _batch(),
+        ClarificationInterpretation: interpretation,
+        PlanProposal: _plan_proposal(),
+    }
+    monkeypatch.setattr(
+        "wildfire_agent.graph.nodes.structured",
+        lambda schema, **_k: _StubRunnable(responses[schema]),
+    )
+
+    session_id = client.post("/api/sessions").json()["session_id"]
+    first = _events(
+        client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "Which neighbourhoods near Altadena should be evacuated first?"},
+        )
+    )
+    assert any(name == "clarification" for name, _ in first)
+
+    resumed = _events(
+        client.post(f"/api/sessions/{session_id}/messages", json={"text": "you decide"})
+    )
+    kinds = [name for name, _ in resumed]
+    assert "error" not in kinds, [d for n, d in resumed if n == "error"]
+    assert "done" in kinds
+
+
+class TestCapabilityQuestions:
+    """"What can I do with you?" - the first thing a new user types.
+
+    It used to run the whole pipeline and reply by asking which geographic area
+    was meant, which is an interrogation in answer to an introduction.
+    """
+
+    def test_it_recognises_how_people_actually_ask(self):
+        from wildfire_agent.api import _asks_capability_question as asks
+
+        for question in (
+            "What can you do?",
+            "What can I do with you?",
+            "What can I ask you?",
+            "What else can I ask you?",
+            "How can you help me?",
+            "What are you capable of?",
+            "what other questions can I ask",
+            "Who are you?",
+            "What is this tool for?",
+        ):
+            assert asks(question), question
+
+    def test_it_leaves_domain_questions_alone(self):
+        """The same verbs point at the domain just as often, and a question
+        about a burn scar answered with a brochure is the worse failure."""
+        from wildfire_agent.api import _asks_capability_question as asks
+
+        for question in (
+            "What can I do about the debris flow risk?",
+            "What should I watch for next?",
+            "what can I do to prepare for the rainy season",
+            "what can you tell me about the Woolsey fire",
+            "what else can I ask about the Woolsey fire",
+            "Which cities did it reach?",
+            "What fires do you have data for?",
+        ):
+            assert not asks(question), question
+
+    def test_the_overview_offers_only_wording_that_works(self):
+        """An example the system then fails to honour is worse than no example,
+        so every declared `ask` must survive its own router."""
+        from wildfire_agent.api import (
+            _asks_archive_question,
+            _asks_capability_question,
+            _asks_post_fire_risk_question,
+        )
+        from wildfire_agent.capability_overview import TOPICS
+
+        for topic in TOPICS:
+            # None of the examples may be swallowed by the capability route
+            # itself, or the answer would loop back to its own menu.
+            assert not _asks_capability_question(topic.ask), topic.ask
+
+        by_title = {t.title: t for t in TOPICS}
+        assert _asks_post_fire_risk_question(by_title["What follows the fire"].ask)
+        assert _asks_archive_question(by_title["What this deployment holds"].ask)
+
+    def test_the_facts_are_derived_rather_than_restated(self):
+        from wildfire_agent.capability_overview import overview_facts
+
+        facts = overview_facts(
+            [
+                {
+                    "name": "Woolsey Fire",
+                    "first_day": "2018-11-07",
+                    "last_day": "2018-11-16",
+                    "burned_area": True,
+                    "active_fire": True,
+                },
+                {
+                    "name": "Thomas Fire",
+                    "first_day": "2017-12-04",
+                    "last_day": "2017-12-13",
+                    "burned_area": False,
+                    "active_fire": True,
+                },
+            ]
+        )
+
+        assert facts["archive"]["event_count"] == 2
+        woolsey, thomas = facts["archive"]["events"]
+        assert woolsey["span"] == "2018-11-07 to 2018-11-16"
+        # The flag the prompt uses to avoid offering a dead end as a starting
+        # point: Thomas has active-fire detections and no burned-area labels.
+        assert woolsey["has_burned_area_labels"] is True
+        assert thomas["has_burned_area_labels"] is False
+
+        # Approval-gated sources come from the coverage declaration, so adding
+        # one cannot silently drop it from this answer.
+        gated = {entry["hazard_object"] for entry in facts["approval_required"]}
+        assert {"exposure", "vulnerability", "post_fire_debris_flow"} <= gated
+
+    def test_an_unreadable_archive_thins_the_answer_rather_than_failing_it(self):
+        from wildfire_agent.capability_overview import overview_facts
+
+        facts = overview_facts([])
+        assert facts["archive"] == {}
+        assert facts["topics"], "the topics stand without the archive files"
+
+    def test_the_turn_answers_without_running_the_pipeline(self, client, monkeypatch):
+        """No contract, no clarification, no layer - and the map is untouched,
+        because a question about the system is not a question about a place."""
+        import wildfire_agent.api as api_module
+
+        async def fake_describe(*, question, facts, expertise):
+            assert facts["topics"]
+            return "You can ask about current fire activity.", [
+                "Are there any ongoing wildfires in the USA?"
+            ]
+
+        def fail_resolve(*_a, **_k):
+            raise AssertionError("the resolver was called on a capability question")
+
+        monkeypatch.setattr(api_module, "describe_capabilities", fake_describe)
+        monkeypatch.setattr(api_module, "resolve_turn", fail_resolve)
+
+        session_id = client.post("/api/sessions").json()["session_id"]
+        events = _events(
+            client.post(
+                f"/api/sessions/{session_id}/messages",
+                json={"text": "What can I do with you?"},
+            )
+        )
+
+        kinds = [name for name, _ in events]
+        assert kinds == ["turn", "summary", "suggestions"]
+        assert dict(events)["turn"]["kind"] == "discussion"
+        assert dict(events)["summary"]["text"] == "You can ask about current fire activity."
+        # The options offered are the ones the reply actually named.
+        items = dict(events)["suggestions"]["items"]
+        assert [i["ask"] for i in items] == ["Are there any ongoing wildfires in the USA?"]
+
+
+class TestCapabilitySuggestions:
+    """The options offered under a capability answer.
+
+    Prose the user has to retype; an offered option is one click from being
+    sent. Wording that does not trigger its topic therefore fails in front of
+    them, which is why the model's choices are checked rather than trusted.
+    """
+
+    def test_only_declared_wording_is_ever_offered(self):
+        from wildfire_agent.capability_overview import TOPICS, suggestions_for
+
+        declared = {t.ask for t in TOPICS}
+        offered = suggestions_for(
+            ["Show the Woolsey fire on 2018-11-16.", "Ask me anything you like"]
+        )
+        assert {item["ask"] for item in offered} <= declared
+        assert [item["ask"] for item in offered] == ["Show the Woolsey fire on 2018-11-16."]
+
+    def test_wording_survives_punctuation_and_case(self):
+        """The model quotes; it does not always quote the full stop."""
+        from wildfire_agent.capability_overview import suggestions_for
+
+        offered = suggestions_for(["show the woolsey fire on 2018-11-16"])
+        assert [item["ask"] for item in offered] == ["Show the Woolsey fire on 2018-11-16."]
+
+    def test_the_menu_is_never_empty(self):
+        from wildfire_agent.capability_overview import FALLBACK_ASKS, suggestions_for
+
+        for named in ([], ["nothing that matches anything"]):
+            assert [item["ask"] for item in suggestions_for(named)] == list(FALLBACK_ASKS)
+
+    def test_duplicates_are_not_offered_twice(self):
+        from wildfire_agent.capability_overview import suggestions_for
+
+        offered = suggestions_for(
+            ["Who are you?", "Show the Woolsey fire on 2018-11-16.", "Show the Woolsey fire on 2018-11-16"]
+        )
+        assert len(offered) == 1
+
+    def test_the_endpoint_serves_the_same_declaration_the_agent_answers_from(self, client):
+        """One list, so a starter question cannot drift from what works."""
+        from wildfire_agent.capability_overview import TOPICS
+
+        body = client.get("/api/capabilities").json()
+        assert [t["ask"] for t in body["topics"]] == [t.ask for t in TOPICS]
+        assert body["approval_required"]
+
+
+def test_a_follow_up_is_never_offered_as_a_one_click_option():
+    """"Which cities did it reach?" is fine in prose and broken as a button.
+
+    A clicked option is sent immediately, so on a fresh session "it" would
+    arrive referring to nothing. The wording stays in the declaration - it is
+    how the topic is actually asked - and is excluded where it becomes clickable.
+    """
+    from wildfire_agent.capability_overview import TOPICS, suggestions_for
+
+    follow_ups = [t.ask for t in TOPICS if t.follow_up]
+    assert "Which cities did it reach?" in follow_ups
+
+    offered = suggestions_for(
+        ["Are there any ongoing wildfires in the USA?", *follow_ups]
+    )
+    assert [item["ask"] for item in offered] == ["Are there any ongoing wildfires in the USA?"]
+
+
+def test_a_capability_answer_survives_a_model_that_returns_nothing(monkeypatch):
+    """A reasoning model can spend its whole completion budget thinking and
+    return nothing. That arrives as an ordinary exception, is indistinguishable
+    from an outage, and must not be what a reviewer sees first."""
+    import asyncio
+
+    from wildfire_agent import narration
+    from wildfire_agent.capability_overview import FALLBACK_ASKS, overview_facts
+
+    def boom(*_a, **_k):
+        raise RuntimeError("length limit reached")
+
+    monkeypatch.setattr(narration, "get_chat_model", boom)
+
+    facts = overview_facts(
+        [
+            {
+                "name": "Woolsey Fire",
+                "first_day": "2018-11-07",
+                "last_day": "2018-11-16",
+                "burned_area": True,
+                "active_fire": True,
+            }
+        ]
+    )
+    text, examples = asyncio.run(
+        narration.describe_capabilities(question="What can you do?", facts=facts)
+    )
+
+    assert "Woolsey Fire" in text
+    assert "Are there any ongoing wildfires in the USA?" in text
+    assert examples == list(FALLBACK_ASKS)

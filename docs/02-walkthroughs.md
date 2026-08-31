@@ -9,6 +9,21 @@
 >
 > Depends on the hazard objects and slot matrix in `docs/01-taxonomy.md`.
 
+> ### Status: design-time artifact, partly superseded
+>
+> These walkthroughs were written *before* the code, to derive the contract schema — and they did
+> their job, which is why they are kept as written rather than rewritten to match. **Do not read
+> them as a description of current behaviour.**
+>
+> One thing has since changed and it is load-bearing in scenario 1: the data-family question is no
+> longer asked. `enforce_family_disambiguation` decides it by stated policy and records a
+> retractable assumption instead. `docs/01` §5.5 has the reasoning and the cost. The correction is
+> marked inline at scenario 1 §3.
+>
+> What the scenarios still establish, and what they were written for, is unaffected: the schema they
+> forced (§ "Schema revisions these scenarios forced"), and scenario 3's demonstration that a
+> capability gap is reported rather than substituted.
+
 ---
 
 ## Scenario 1 — the primary demo
@@ -90,6 +105,24 @@ tightens, turns solid, and the "radius not specified" assumption disappears from
 > **Knowing which is which is the entire product.**"
 
 **User replies:** "both, 10 km"
+
+> #### ⚠ Superseded — this question is no longer asked
+>
+> As of `docs/01` §5.5, the family choice does not block and no question is put. *"Where are the
+> active fires near Altadena?"* carries no heat or hotspot wording, so branch 3 selects **officially
+> confirmed perimeters** — the conservative default — and writes
+> `"Fire evidence selected automatically: Officially confirmed fire perimeters."` into
+> `assumptions`, where the user can retract it. The radius behaviour below is unchanged.
+>
+> The demo line above must not be delivered as written. What is true now is nearer to:
+>
+> > "It did not stop to ask which kind of fire evidence you meant — that would have made you
+> > adjudicate WFIGS against VIIRS before seeing a map. It chose the verified one, told you it
+> > chose, and left it retractable. What it *will* stop and ask about is going out to a third party
+> > on your behalf."
+>
+> The reply *"both, 10 km"* below therefore has no question to answer. Read the rest of this
+> scenario as the schema derivation it was written to be, not as a transcript.
 
 ### 4. Resulting contract
 

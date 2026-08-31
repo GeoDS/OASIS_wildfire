@@ -3,24 +3,47 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ExpertisePicker } from "./ExpertisePicker";
-import type { ChatMessage, ClarificationQuestion, ExpertiseLevel } from "@/lib/types";
+import { getCapabilities } from "@/lib/api";
+import type {
+  ChatMessage,
+  ClarificationQuestion,
+  ExpertiseLevel,
+  SuggestionItem,
+} from "@/lib/types";
 
-// Each starter is backed by data this demo actually holds. The follow-up line
-// tells the user how to test context continuity after the first answer.
-const SAMPLE_QUESTIONS = [
-  {
-    prompt: "Show the lifecycle of the Bobcat Fire on 2020-09-18.",
-    followUp: "Then ask: Which cities were closest to this fire?",
-  },
-  {
-    prompt: "Are there any ongoing wildfires in the USA?",
-    followUp: "Then ask: Is there a fire near Altadena right now?",
-  },
-  {
-    prompt: "Show current weather and fire-related conditions in Santa Barbara, California.",
-    followUp: "Then ask: Is there a fire nearby?",
-  },
-];
+// Starters come from `GET /api/capabilities` - the same declaration the agent
+// answers "what can you do" from. They used to be hardcoded here, which is a
+// second place for the list to be wrong: wording that no longer triggers its
+// topic fails in front of the user, and nothing in the build would catch it.
+const STARTER_COUNT = 3;
+
+function SuggestionList({
+  items,
+  busy,
+  onSend,
+}: {
+  items: SuggestionItem[];
+  busy: boolean;
+  onSend: (text: string) => void;
+}) {
+  return (
+    <div className="mt-3 space-y-1.5">
+      {items.map((item) => (
+        <button
+          key={item.ask}
+          type="button"
+          onClick={() => onSend(item.ask)}
+          disabled={busy}
+          className="block min-h-11 w-full rounded-lg border border-paper-300 bg-white px-3 py-2.5 text-left text-[12px] leading-[1.45] text-ink-700 transition hover:border-ember-300 hover:bg-ember-50 hover:text-ink-900 disabled:opacity-50"
+        >
+          <span className="block">{item.ask}</span>
+          <span className="mt-1 block text-[10.5px] text-ink-400">{item.does}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 
 function OptionButton({
   label,
@@ -101,8 +124,25 @@ export function ChatPanel({
   onClose?: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  const [starters, setStarters] = useState<SuggestionItem[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // An unreachable backend leaves the empty state without starters rather than
+  // with stale ones: a question that cannot be sent is worse than no offer.
+  useEffect(() => {
+    let live = true;
+    getCapabilities()
+      .then((payload) => {
+        if (!live) return;
+        // Follow-ups read as questions but only mean something after an answer.
+        setStarters(payload.topics.filter((t) => !t.follow_up).slice(0, STARTER_COUNT));
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -144,22 +184,10 @@ export function ChatPanel({
       </header>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
-        {messages.length === 0 && (
+        {messages.length === 0 && starters.length > 0 && (
           <div className="space-y-2">
-            <p className="text-[12px] text-ink-500">Try one of the walkthrough scenarios:</p>
-            {SAMPLE_QUESTIONS.map((question) => (
-              <button
-                key={question.prompt}
-                onClick={() => onSend(question.prompt)}
-                disabled={busy}
-                className="block min-h-11 w-full rounded-lg border border-paper-300 bg-white px-3 py-2.5 text-left text-[12px] leading-[1.45] text-ink-700 transition hover:border-ember-300 hover:bg-ember-50 hover:text-ink-900 disabled:opacity-50"
-              >
-                <span className="block">{question.prompt}</span>
-                <span className="mt-1 block text-[10.5px] text-ink-400">
-                  {question.followUp}
-                </span>
-              </button>
-            ))}
+            <p className="text-[12px] text-ink-500">Try one of these:</p>
+            <SuggestionList items={starters} busy={busy} onSend={onSend} />
           </div>
         )}
 
@@ -176,6 +204,9 @@ export function ChatPanel({
               {msg.clarification?.questions.map((q) => (
                 <QuestionBlock key={q.slot} question={q} onPick={appendOption} />
               ))}
+              {msg.suggestions && msg.suggestions.length > 0 && (
+                <SuggestionList items={msg.suggestions} busy={busy} onSend={onSend} />
+              )}
             </div>
           ),
         )}
