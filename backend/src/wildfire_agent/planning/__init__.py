@@ -8,7 +8,7 @@ boundary the task brief draws. The contract is the only thing that crosses it.
 from .capabilities import CAPABILITIES, SHOWCASE_AREA, Capability
 from .executor import execute, summarise
 from .models import ExecutionPlan, LayerResult, PlannedLayer, UnmetNeed
-from .planner import build_plan, deterministic_plan
+from .planner import build_plan, deployment_unmet_needs, deterministic_plan
 
 __all__ = [
     "CAPABILITIES",
@@ -19,6 +19,7 @@ __all__ = [
     "PlannedLayer",
     "UnmetNeed",
     "build_plan",
+    "deployment_unmet_needs",
     "deterministic_plan",
     "execute",
     "summarise",

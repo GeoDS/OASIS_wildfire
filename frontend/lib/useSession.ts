@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   createSession,
+  clearSessions as clearArchivedSessions,
   deleteSession as deleteArchivedSession,
   fetchFireLifecycle,
   getHealth,
@@ -20,6 +21,7 @@ import {
   type AnalysisContract,
   type ChatMessage,
   type ClarificationPayload,
+  type SuggestionsPayload,
   type ExecutionPlan,
   type ExpertiseLevel,
   type FireContext,
@@ -167,6 +169,15 @@ export function useSession() {
     if (remaining[0]) await openSession(remaining[0].id);
     else await reset();
   }, [openSession, refreshSessions, reset, sessionId]);
+
+  // Everything, irreversibly. The fresh session afterwards is a real new one:
+  // keeping the old id would point the UI at a row that no longer exists.
+  const clearAllSessions = useCallback(async () => {
+    const deleted = await clearArchivedSessions();
+    await reset();
+    await refreshSessions();
+    return deleted;
+  }, [refreshSessions, reset]);
 
   useEffect(() => {
     let cancelled = false;
@@ -344,6 +355,20 @@ export function useSession() {
               ...prev,
               { role: "agent", content: (data as { text: string }).text },
             ]);
+          } else if (event === "suggestions") {
+            // Arrives immediately after the summary it belongs to, so it
+            // attaches to that message rather than becoming one of its own -
+            // options with no answer above them read as the agent changing the
+            // subject. If no agent message is there to carry them, they are
+            // dropped: a menu floating on its own is worse than none.
+            const items = (data as SuggestionsPayload).items;
+            setMessages((prev) => {
+              const last = prev.length - 1;
+              if (last < 0 || prev[last].role !== "agent") return prev;
+              const next = [...prev];
+              next[last] = { ...next[last], suggestions: items };
+              return next;
+            });
           } else if (event === "done") {
             // Slots still marked stale were not produced by this turn - a
             // weather-only answer draws no fire layers - so now they go.
@@ -468,6 +493,7 @@ export function useSession() {
     historyLoading,
     openSession,
     renameSession,
+    clearAllSessions,
     removeSession,
     health,
     taxonomy,

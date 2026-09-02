@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wildfire_agent import api
-from wildfire_agent.contract import ResolvedLocation
+from wildfire_agent.contract import AnalysisContract, ResolvedLocation
 from wildfire_agent.graph.models import (
     ClarificationBatch,
     ClarificationInterpretation,
@@ -1087,3 +1087,732 @@ class TestATruncatedCountIsNotTheCount:
         facts = api._debris_facts("Bobcat Fire", drawn=1500, truncated=True, source="p",
                                   remaining=("rainfall threshold",))
         assert facts["still_missing"] == ["rainfall threshold"]
+
+
+class TestAnArchiveQuestionDoesNotDependOnClassification:
+    """"What fires do you have data for" was answered by listing all nine
+    events - when the resolver happened to call it discussion. On a rerun it
+    called the same question analysis, the pipeline ran, and the user was asked
+    which geographic area to consider. Nothing consulted the archive.
+
+    The archive is in the session context either way. Whether it gets read
+    should not depend on a sampling decision, so the user's own words settle it
+    - the same override `_asks_post_fire_risk_question` already makes in the
+    other direction.
+    """
+
+    def test_the_wordings_that_ask_what_exists(self):
+        for text in (
+            "what fires do you have data for",
+            "what's in your database",
+            "what data do you have",
+            "list all the fire events you can analyse",
+            "which fires are in the archive",
+            "what can you analyse",
+        ):
+            assert api._asks_archive_question(text), text
+
+    def test_a_question_about_a_fire_is_not_a_question_about_the_archive(self):
+        """"Which cities did the Bobcat Fire reach" needs the pipeline. Routing
+        it to the archive answer would replace a result with a catalogue."""
+        for text in (
+            "which cities did it reach?",
+            "show the lifecycle of the Bobcat Fire",
+            "how is the weather at altadena",
+            "what's the population here",
+            "how wealthy are those places",
+        ):
+            assert not api._asks_archive_question(text), text
+
+    def test_it_only_ever_routes_toward_the_answer(self):
+        """The override adds a route; it never takes one away. A turn the
+        resolver already called discussion is left alone."""
+        assert api._archive_kind("analysis", "what fires do you have data for") == "discussion"
+        assert api._archive_kind("discussion", "what fires do you have data for") == "discussion"
+        assert api._archive_kind("analysis", "which cities did it reach?") == "analysis"
+        assert api._archive_kind("discussion", "which cities did it reach?") == "discussion"
+
+
+class TestAnApprovedFetchIsOnTheRecord:
+    """The backend emits `data_fill` with source, what was closed, what remains
+    missing, what failed and what the Bureau suppressed. No frontend consumes
+    it - not the old one, not the new one - so the one capability the review
+    asked to see demonstrated leaves no trace a reviewer can point at beyond
+    the numbers changing.
+
+    `contract.assumptions` is already rendered under Limits, and `_run` emits
+    `done` with the same contract object after rendering. Recording the fill
+    there puts the provenance on screen with no frontend change.
+    """
+
+    def _contract(self) -> AnalysisContract:
+        return AnalysisContract(original_request="which cities did it reach?")
+
+    def test_the_source_and_vintage_are_recorded(self):
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract,
+            source="U.S. Census Bureau, American Community Survey",
+            dataset="ACS 5-year estimates, 2020-2024",
+            closed=("population count", "housing density"),
+            remaining=("building footprints", "WUI boundary"),
+            count=3, unit=("place", "places"), complete=True,
+            failed={},
+        )
+        note = " ".join(contract.assumptions)
+        assert "American Community Survey" in note
+        assert "ACS 5-year estimates, 2020-2024" in note
+        assert "3" in note
+
+    def test_it_says_the_user_approved_it(self):
+        """Participation is the thing being demonstrated, so the record has to
+        say a person authorised this rather than that data appeared."""
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="s", dataset="d", closed=("population count",),
+            remaining=(), count=1, unit=("place", "places"), complete=True, failed={},
+        )
+        assert "approval" in " ".join(contract.assumptions).lower()
+
+    def test_what_is_still_missing_is_recorded_beside_it(self):
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="s", dataset="d", closed=("population count",),
+            remaining=("WUI boundary",), count=1, unit=("place", "places"), complete=True, failed={},
+        )
+        assert "WUI boundary" in " ".join(contract.assumptions)
+
+    def test_a_place_that_failed_is_named_not_folded_into_the_count(self):
+        """"We could not reach the API for Duarte" and "nobody lives in Duarte"
+        must never read alike - that holds on the record too."""
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="s", dataset="d", closed=("population count",),
+            remaining=(), count=2, unit=("place", "places"), complete=True, failed={"Duarte": "Census API unreachable"},
+        )
+        note = " ".join(contract.assumptions)
+        assert "Duarte" in note
+        assert "could not" in note.lower() or "not fetched" in note.lower()
+
+    def test_a_fill_that_closed_nothing_is_not_claimed_as_one_that_did(self):
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="s", dataset="d", closed=(), remaining=("WUI boundary",),
+            count=0, unit=("place", "places"), complete=True, failed={"Monrovia": "unreachable"},
+        )
+        note = " ".join(contract.assumptions)
+        assert "returned nothing" in note.lower() or "no attributes" in note.lower()
+
+
+class TestTheRecordNamesWhatItCounted:
+    """The first version of this record said "fetched ... for 1500 place(s)"
+    about debris-flow polygons - the wrong noun, and a truncated count stated as
+    a count. Both are mistakes fixed elsewhere today and reintroduced here in a
+    new sentence, which is what makes them worth a test rather than a re-read.
+    """
+
+    def _contract(self) -> AnalysisContract:
+        return AnalysisContract(original_request="q")
+
+    def test_hazard_areas_are_not_called_places(self):
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="ArcGIS Online catalogue", dataset="hazard areas",
+            closed=("burn scar extent",), remaining=(), count=1500,
+            unit=("hazard area", "hazard areas"), complete=False, failed={},
+        )
+        note = " ".join(contract.assumptions)
+        assert "hazard areas" in note
+        assert "place(s)" not in note
+
+    def test_a_capped_fetch_says_the_count_is_the_cap(self):
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="s", dataset="d", closed=("burn scar extent",),
+            remaining=(), count=1500, unit=("hazard area", "hazard areas"),
+            complete=False, failed={},
+        )
+        assert "not the total" in " ".join(contract.assumptions)
+
+    def test_a_complete_fetch_makes_no_such_claim(self):
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="s", dataset="d", closed=("population count",),
+            remaining=(), count=3, unit=("place", "places"), complete=True, failed={},
+        )
+        note = " ".join(contract.assumptions)
+        assert "3 places" in note
+        assert "not the total" not in note
+
+    def test_one_of_a_thing_is_singular(self):
+        contract = self._contract()
+        api._record_fill_on_contract(
+            contract, source="s", dataset="d", closed=("population count",),
+            remaining=(), count=1, unit=("place", "places"), complete=True, failed={},
+        )
+        assert "1 place," in " ".join(contract.assumptions)
+
+
+class TestANationwideQuestionHasNoPlace:
+    """"Are there any ongoing fires in the USA" named no city, so it fell into
+    the place pipeline, found nothing to geocode, and returned nothing at all.
+
+    It is a question about the country. WFIGS answers it directly - 237 current
+    perimeters as this was written - and needs no subject resolved first.
+    """
+
+    def test_the_wordings_that_ask_about_the_country(self):
+        for text in (
+            "are there any ongoing fires in the USA",
+            "are there any ongoing wildfires",
+            "what fires are burning right now",
+            "any active fires in the country",
+            "is anything burning in the US right now",
+        ):
+            assert api._asks_national_fire_question(text), text
+
+    def test_a_question_about_a_place_is_not_one(self):
+        """A named place keeps the pipeline that resolves it."""
+        for text in (
+            "is there a fire near Altadena right now",
+            "are there any fires near Santa Barbara",
+            "show the lifecycle of the Bobcat Fire",
+            "which cities did it reach?",
+        ):
+            assert not api._asks_national_fire_question(text), text
+
+    def test_the_summary_leads_with_the_count_and_the_largest(self):
+        status = api._national_fire_status([
+            {"properties": {"poly_IncidentName": "Big Grass", "attr_IncidentSize": 578637,
+                            "attr_POOState": "US-OR"}},
+            {"properties": {"poly_IncidentName": "Tartar", "attr_IncidentSize": 158027,
+                            "attr_POOState": "US-ID"}},
+        ])
+        assert "2" in status["message"]
+        assert "Big Grass" in status["message"]
+        assert "578,637" in status["message"]
+        assert "Oregon" in status["message"] or "OR" in status["message"]
+
+    def test_none_reported_is_not_none_burning(self):
+        """An agency perimeter is published after mapping, so an empty list is
+        about the record, not about the country."""
+        status = api._national_fire_status([])
+        assert "0" in status["message"] or "no " in status["message"].lower()
+        assert any("not" in d.lower() for d in status["details"])
+
+    def test_a_fire_without_a_reported_size_is_not_counted_as_zero_acres(self):
+        status = api._national_fire_status([
+            {"properties": {"poly_IncidentName": "Hudson", "attr_IncidentSize": None,
+                            "attr_POOState": "US-CA"}},
+        ])
+        assert "Hudson" in status["message"]
+        assert "0 acres" not in status["message"]
+
+
+@pytest.mark.asyncio
+async def test_the_city_branch_records_its_fill_without_crashing(monkeypatch):
+    """`_record_fill_on_contract` was renamed and one of its three call sites
+    was missed. 373 unit tests stayed green because none of them drives the
+    city-branch ACS fill end to end - a real conversation found it on the first
+    "Fetch it" about a place rather than a fire.
+
+    This drives the renderer, so a signature drift here fails loudly.
+    """
+    from wildfire_agent.exposure import EnrichmentResult
+    from wildfire_agent.planning.models import LayerResult
+
+    subject = LayerResult(
+        capability_id="subject_city_boundary", title="Altadena boundary",
+        hazard_object="exposure", geometry_type="Polygon", caveat="c", feature_count=1,
+        source="TIGER/Line", as_of="2025-01-01",
+        geojson={"type": "FeatureCollection", "features": [{
+            "type": "Feature", "geometry": None,
+            "properties": {"name": "Altadena", "geoid": "0601290", "population": 42846}}]},
+    )
+    status = {"status": "city_assessed", "workflow": "city", "message": "m", "details": []}
+
+    async def fake_context(_contract):
+        return status, [subject]
+
+    async def fake_narrate(**_kwargs):
+        return "ok"
+
+    monkeypatch.setattr(api, "_automatic_city_context", fake_context)
+    monkeypatch.setattr(api, "narrate", fake_narrate)
+    monkeypatch.setattr(
+        api, "enrich_places_with_acs",
+        lambda layer: EnrichmentResult(
+            layer=layer, closed=("population count",),
+            source={"source": "U.S. Census Bureau", "dataset": "ACS 5-year estimates"},
+        ),
+    )
+
+    contract = AnalysisContract(original_request="what's the population here")
+    outcome = api._RenderOutcome(variables=("population",))
+    outcome.decisions.record("census_acs", True)
+    events = [
+        event
+        async for event in api._render_city_context(contract, api.MessageIn(text="q"), outcome)
+    ]
+
+    assert events
+    # The fill reached the contract, which is what the Limits tab renders.
+    assert any("your approval" in a for a in contract.assumptions)
+
+
+class TestAnUnclearReplyIsNotSwallowed:
+    """A session parked on a fetch offer treated the next message as the answer
+    to it. "How many hazard areas are there?" is not a yes or a no, so the offer
+    was re-asked and the question vanished - and in a real walkthrough that
+    killed every turn after it.
+
+    The offer stays open, because consent must not be guessed. But the question
+    the user actually asked has to be answered rather than eaten.
+    """
+
+    def _pending(self) -> api.PendingFill:
+        return api.PendingFill(
+            offer={
+                "source_id": "census_acs", "source": "s", "dataset": "d", "geography": "g",
+                "closes": ("population count",), "remaining": (),
+            },
+            capability_id="places",
+        )
+
+    def test_a_yes_is_still_a_decision(self):
+        assert self._pending().decide("Fetch it") is True
+
+    def test_a_no_is_still_a_decision(self):
+        assert self._pending().decide("Answer without it") is False
+
+    def test_a_question_is_not_a_decision(self):
+        assert self._pending().decide("How many hazard areas are there?") is None
+
+    def test_an_unclear_reply_that_is_a_real_question_is_carried_forward(self):
+        """The distinction that matters: "hmm" is noise and should just re-ask,
+        but "how many hazard areas are there?" is a question owed an answer."""
+        assert api._is_a_new_question("How many hazard areas are there?") is True
+        assert api._is_a_new_question("What kind of land did it burn?") is True
+        assert api._is_a_new_question("which cities did it reach") is True
+
+    def test_noise_is_not_treated_as_a_question(self):
+        for text in ("hmm", "ok what", "?", "   ", "uh"):
+            assert api._is_a_new_question(text) is False, text
+
+
+class TestClearingEveryConversation:
+    """A bulk delete is the one action here that cannot be undone, so it says
+    how many it will remove before it does, and leaves the session it hands
+    back genuinely empty rather than pointing at a row that no longer exists.
+    """
+
+    def test_it_reports_how_many_it_removed(self, client):
+        before = len(client.get("/api/sessions").json()["sessions"])
+        client.post("/api/sessions")
+        client.post("/api/sessions")
+        response = client.delete("/api/sessions")
+
+        assert response.status_code == 200
+        assert response.json()["deleted"] >= before + 2
+        assert client.get("/api/sessions").json()["sessions"] == []
+
+    def test_clearing_an_empty_store_is_not_an_error(self):
+        """Idempotent: pressing it twice is not a failure the second time."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(api.app) as fresh:
+            fresh.delete("/api/sessions")
+            second = fresh.delete("/api/sessions")
+            assert second.status_code == 200
+            assert second.json()["deleted"] == 0
+
+    def test_a_cleared_session_takes_its_consent_with_it(self, client):
+        """Fetch decisions are keyed by session id. Leaving them behind means a
+        deleted conversation's approvals outlive the conversation."""
+        sid = client.post("/api/sessions").json()["session_id"]
+        api._fill_decisions[sid] = api.FillDecisions()
+        api._fill_decisions[sid].record("census_acs", True)
+        api._pending_fills[sid] = api.PendingFill(
+            offer={"source_id": "census_acs", "source": "s", "dataset": "d",
+                   "geography": "g", "closes": ("population count",), "remaining": ()},
+            capability_id="places",
+        )
+
+        client.delete("/api/sessions")
+
+        assert sid not in api._fill_decisions
+        assert sid not in api._pending_fills
+        assert sid not in api._session_contexts
+
+    def test_deleting_one_session_also_takes_its_consent(self, client):
+        sid = client.post("/api/sessions").json()["session_id"]
+        api._fill_decisions[sid] = api.FillDecisions()
+
+        client.delete(f"/api/sessions/{sid}")
+
+        assert sid not in api._fill_decisions
+
+
+def test_the_suite_never_touches_the_real_session_database():
+    """A session endpoint used to write to `.runtime/wildfire-sessions.sqlite3`
+    - the file a running server is serving - because `_session_store` binds to
+    it at import. Running the tests emptied a live conversation history once.
+    """
+    from wildfire_agent.config import settings
+
+    assert api._session_store.path != settings.session_db_path
+    assert ".runtime" not in str(api._session_store.path)
+
+
+def test_taxonomy_separates_registry_dispatch_from_what_can_be_served(client):
+    """`covered_by` answers "which capability id draws this", and six hazard
+    objects the system serves every day have none. Answering "can this
+    deployment serve it" from that field understated the deployment by six."""
+    body = client.get("/api/taxonomy").json()
+
+    spread = body["hazard_objects"]["fire_spread"]
+    assert spread["covered_by"] == []
+    assert spread["served"] is True
+
+    evacuation = body["hazard_objects"]["evacuation"]
+    assert evacuation["covered_by"] == []
+    assert evacuation["served"] is False
+
+    # And what is served only partly says which variables it still lacks.
+    assert body["hazard_objects"]["exposure"]["unserved_variables"] == [
+        "building footprints",
+        "WUI boundary",
+    ]
+
+
+def test_a_capability_gap_reaches_the_client_on_the_renderer_path(client, monkeypatch):
+    """The Limits tab reads `plan.unmet`, and the plan event is suppressed once a
+    location resolves - so on the path users actually take, "this deployment
+    cannot do that at all" had nowhere to appear. Layers stay suppressed, since
+    the registry's Altadena snapshots are not what gets drawn; the gap travels.
+    """
+    from wildfire_agent.graph.models import (
+        ClarificationBatch,
+        ClarificationInterpretation,
+        CompiledTask,
+        RequirementUnderstanding,
+    )
+    from wildfire_agent.planning.planner import PlanProposal
+
+    understanding = _understanding()
+    understanding.hazard_objects = ["active_fire", "evacuation"]
+    responses = {
+        RequirementUnderstanding: understanding,
+        CompiledTask: _compiled(),
+        ClarificationBatch: _batch(),
+        ClarificationInterpretation: _interpretation(),
+        PlanProposal: _plan_proposal(),
+    }
+    monkeypatch.setattr(
+        "wildfire_agent.graph.nodes.structured",
+        lambda schema, **_k: _StubRunnable(responses[schema]),
+    )
+
+    session_id = client.post("/api/sessions").json()["session_id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"text": "Where should people near Altadena evacuate to?"},
+    )
+
+    plans = [d for e, d in _events(response) if e == "plan"]
+    assert plans, "the capability gap never reached the client"
+    plan = plans[-1]
+    assert [u["hazard_object"] for u in plan["unmet"]] == ["evacuation"]
+    assert plan["layers"] == []
+
+
+def test_answering_a_clarification_does_not_crash_the_turn(client, monkeypatch):
+    """`national` was assigned only where a *new* question is classified, and
+    read unconditionally after the graph. Every clarification answer therefore
+    died with an UnboundLocalError after the user had already done the work of
+    answering - the one path in the system that must not fail quietly."""
+    from wildfire_agent.graph.models import (
+        ClarificationBatch,
+        ClarificationInterpretation,
+        CompiledTask,
+        RequirementUnderstanding,
+        SlotUpdate,
+    )
+    from wildfire_agent.planning.planner import PlanProposal
+
+    understanding = _understanding()
+    understanding.hazard_objects = ["active_fire", "evacuation"]
+    # Decision support blocks on `comparison_basis`, which nothing fills - so
+    # the graph genuinely parks on an interrupt and the next message resumes it.
+    understanding.task_intent = ["decision_support"]
+    # The answer settles it, so the resumed run finishes the graph and reaches
+    # the code after it. A resume that merely re-asks never gets that far, and
+    # would not have caught this.
+    interpretation = ClarificationInterpretation(
+        updates=[
+            SlotUpdate(slot="location", value="10 km buffer around Altadena, CA"),
+            SlotUpdate(slot="target", value="official_fire_perimeters"),
+            SlotUpdate(slot="comparison_basis", value="by exposed population"),
+        ]
+    )
+    responses = {
+        RequirementUnderstanding: understanding,
+        CompiledTask: _compiled(),
+        ClarificationBatch: _batch(),
+        ClarificationInterpretation: interpretation,
+        PlanProposal: _plan_proposal(),
+    }
+    monkeypatch.setattr(
+        "wildfire_agent.graph.nodes.structured",
+        lambda schema, **_k: _StubRunnable(responses[schema]),
+    )
+
+    session_id = client.post("/api/sessions").json()["session_id"]
+    first = _events(
+        client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "Which neighbourhoods near Altadena should be evacuated first?"},
+        )
+    )
+    assert any(name == "clarification" for name, _ in first)
+
+    resumed = _events(
+        client.post(f"/api/sessions/{session_id}/messages", json={"text": "you decide"})
+    )
+    kinds = [name for name, _ in resumed]
+    assert "error" not in kinds, [d for n, d in resumed if n == "error"]
+    assert "done" in kinds
+
+
+class TestCapabilityQuestions:
+    """"What can I do with you?" - the first thing a new user types.
+
+    It used to run the whole pipeline and reply by asking which geographic area
+    was meant, which is an interrogation in answer to an introduction.
+    """
+
+    def test_it_recognises_how_people_actually_ask(self):
+        from wildfire_agent.api import _asks_capability_question as asks
+
+        for question in (
+            "What can you do?",
+            "What can I do with you?",
+            "What can I ask you?",
+            "What else can I ask you?",
+            "How can you help me?",
+            "What are you capable of?",
+            "what other questions can I ask",
+            "Who are you?",
+            "What is this tool for?",
+        ):
+            assert asks(question), question
+
+    def test_it_leaves_domain_questions_alone(self):
+        """The same verbs point at the domain just as often, and a question
+        about a burn scar answered with a brochure is the worse failure."""
+        from wildfire_agent.api import _asks_capability_question as asks
+
+        for question in (
+            "What can I do about the debris flow risk?",
+            "What should I watch for next?",
+            "what can I do to prepare for the rainy season",
+            "what can you tell me about the Woolsey fire",
+            "what else can I ask about the Woolsey fire",
+            "Which cities did it reach?",
+            "What fires do you have data for?",
+        ):
+            assert not asks(question), question
+
+    def test_the_overview_offers_only_wording_that_works(self):
+        """An example the system then fails to honour is worse than no example,
+        so every declared `ask` must survive its own router."""
+        from wildfire_agent.api import (
+            _asks_archive_question,
+            _asks_capability_question,
+            _asks_post_fire_risk_question,
+        )
+        from wildfire_agent.capability_overview import TOPICS
+
+        for topic in TOPICS:
+            # None of the examples may be swallowed by the capability route
+            # itself, or the answer would loop back to its own menu.
+            assert not _asks_capability_question(topic.ask), topic.ask
+
+        by_title = {t.title: t for t in TOPICS}
+        assert _asks_post_fire_risk_question(by_title["What follows the fire"].ask)
+        assert _asks_archive_question(by_title["What this deployment holds"].ask)
+
+    def test_the_facts_are_derived_rather_than_restated(self):
+        from wildfire_agent.capability_overview import overview_facts
+
+        facts = overview_facts(
+            [
+                {
+                    "name": "Woolsey Fire",
+                    "first_day": "2018-11-07",
+                    "last_day": "2018-11-16",
+                    "burned_area": True,
+                    "active_fire": True,
+                },
+                {
+                    "name": "Thomas Fire",
+                    "first_day": "2017-12-04",
+                    "last_day": "2017-12-13",
+                    "burned_area": False,
+                    "active_fire": True,
+                },
+            ]
+        )
+
+        assert facts["archive"]["event_count"] == 2
+        woolsey, thomas = facts["archive"]["events"]
+        assert woolsey["span"] == "2018-11-07 to 2018-11-16"
+        # The flag the prompt uses to avoid offering a dead end as a starting
+        # point: Thomas has active-fire detections and no burned-area labels.
+        assert woolsey["has_burned_area_labels"] is True
+        assert thomas["has_burned_area_labels"] is False
+
+        # Approval-gated sources come from the coverage declaration, so adding
+        # one cannot silently drop it from this answer.
+        gated = {entry["hazard_object"] for entry in facts["approval_required"]}
+        assert {"exposure", "vulnerability", "post_fire_debris_flow"} <= gated
+
+    def test_an_unreadable_archive_thins_the_answer_rather_than_failing_it(self):
+        from wildfire_agent.capability_overview import overview_facts
+
+        facts = overview_facts([])
+        assert facts["archive"] == {}
+        assert facts["topics"], "the topics stand without the archive files"
+
+    def test_the_turn_answers_without_running_the_pipeline(self, client, monkeypatch):
+        """No contract, no clarification, no layer - and the map is untouched,
+        because a question about the system is not a question about a place."""
+        import wildfire_agent.api as api_module
+
+        async def fake_describe(*, question, facts, expertise):
+            assert facts["topics"]
+            return "You can ask about current fire activity.", [
+                "Are there any ongoing wildfires in the USA?"
+            ]
+
+        def fail_resolve(*_a, **_k):
+            raise AssertionError("the resolver was called on a capability question")
+
+        monkeypatch.setattr(api_module, "describe_capabilities", fake_describe)
+        monkeypatch.setattr(api_module, "resolve_turn", fail_resolve)
+
+        session_id = client.post("/api/sessions").json()["session_id"]
+        events = _events(
+            client.post(
+                f"/api/sessions/{session_id}/messages",
+                json={"text": "What can I do with you?"},
+            )
+        )
+
+        kinds = [name for name, _ in events]
+        assert kinds == ["turn", "summary", "suggestions"]
+        assert dict(events)["turn"]["kind"] == "discussion"
+        assert dict(events)["summary"]["text"] == "You can ask about current fire activity."
+        # The options offered are the ones the reply actually named.
+        items = dict(events)["suggestions"]["items"]
+        assert [i["ask"] for i in items] == ["Are there any ongoing wildfires in the USA?"]
+
+
+class TestCapabilitySuggestions:
+    """The options offered under a capability answer.
+
+    Prose the user has to retype; an offered option is one click from being
+    sent. Wording that does not trigger its topic therefore fails in front of
+    them, which is why the model's choices are checked rather than trusted.
+    """
+
+    def test_only_declared_wording_is_ever_offered(self):
+        from wildfire_agent.capability_overview import TOPICS, suggestions_for
+
+        declared = {t.ask for t in TOPICS}
+        offered = suggestions_for(
+            ["Show the Woolsey fire on 2018-11-16.", "Ask me anything you like"]
+        )
+        assert {item["ask"] for item in offered} <= declared
+        assert [item["ask"] for item in offered] == ["Show the Woolsey fire on 2018-11-16."]
+
+    def test_wording_survives_punctuation_and_case(self):
+        """The model quotes; it does not always quote the full stop."""
+        from wildfire_agent.capability_overview import suggestions_for
+
+        offered = suggestions_for(["show the woolsey fire on 2018-11-16"])
+        assert [item["ask"] for item in offered] == ["Show the Woolsey fire on 2018-11-16."]
+
+    def test_the_menu_is_never_empty(self):
+        from wildfire_agent.capability_overview import FALLBACK_ASKS, suggestions_for
+
+        for named in ([], ["nothing that matches anything"]):
+            assert [item["ask"] for item in suggestions_for(named)] == list(FALLBACK_ASKS)
+
+    def test_duplicates_are_not_offered_twice(self):
+        from wildfire_agent.capability_overview import suggestions_for
+
+        offered = suggestions_for(
+            ["Who are you?", "Show the Woolsey fire on 2018-11-16.", "Show the Woolsey fire on 2018-11-16"]
+        )
+        assert len(offered) == 1
+
+    def test_the_endpoint_serves_the_same_declaration_the_agent_answers_from(self, client):
+        """One list, so a starter question cannot drift from what works."""
+        from wildfire_agent.capability_overview import TOPICS
+
+        body = client.get("/api/capabilities").json()
+        assert [t["ask"] for t in body["topics"]] == [t.ask for t in TOPICS]
+        assert body["approval_required"]
+
+
+def test_a_follow_up_is_never_offered_as_a_one_click_option():
+    """"Which cities did it reach?" is fine in prose and broken as a button.
+
+    A clicked option is sent immediately, so on a fresh session "it" would
+    arrive referring to nothing. The wording stays in the declaration - it is
+    how the topic is actually asked - and is excluded where it becomes clickable.
+    """
+    from wildfire_agent.capability_overview import TOPICS, suggestions_for
+
+    follow_ups = [t.ask for t in TOPICS if t.follow_up]
+    assert "Which cities did it reach?" in follow_ups
+
+    offered = suggestions_for(
+        ["Are there any ongoing wildfires in the USA?", *follow_ups]
+    )
+    assert [item["ask"] for item in offered] == ["Are there any ongoing wildfires in the USA?"]
+
+
+def test_a_capability_answer_survives_a_model_that_returns_nothing(monkeypatch):
+    """A reasoning model can spend its whole completion budget thinking and
+    return nothing. That arrives as an ordinary exception, is indistinguishable
+    from an outage, and must not be what a reviewer sees first."""
+    import asyncio
+
+    from wildfire_agent import narration
+    from wildfire_agent.capability_overview import FALLBACK_ASKS, overview_facts
+
+    def boom(*_a, **_k):
+        raise RuntimeError("length limit reached")
+
+    monkeypatch.setattr(narration, "get_chat_model", boom)
+
+    facts = overview_facts(
+        [
+            {
+                "name": "Woolsey Fire",
+                "first_day": "2018-11-07",
+                "last_day": "2018-11-16",
+                "burned_area": True,
+                "active_fire": True,
+            }
+        ]
+    )
+    text, examples = asyncio.run(
+        narration.describe_capabilities(question="What can you do?", facts=facts)
+    )
+
+    assert "Woolsey Fire" in text
+    assert "Are there any ongoing wildfires in the USA?" in text
+    assert examples == list(FALLBACK_ASKS)

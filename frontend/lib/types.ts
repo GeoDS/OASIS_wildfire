@@ -419,11 +419,42 @@ export const HANDOFF_INDEX = 4;
 export type StageId = (typeof STAGES)[number];
 export type StageStatus = "pending" | "active" | "done";
 
+export interface SuggestionItem {
+  title: string;
+  /** Wording verified to trigger the topic. Sent as-is; never paraphrased. */
+  ask: string;
+  does: string;
+  /** True when the wording refers back to an earlier answer. Never offer these
+   *  as buttons: a click sends immediately, and "it" would refer to nothing. */
+  follow_up?: boolean;
+}
+
+export interface SuggestionsPayload {
+  type: "suggestions";
+  items: SuggestionItem[];
+}
+
+/** `GET /api/capabilities` - the declaration the agent answers "what can you
+ *  do" from, served so the starter questions come from the same list. */
+export interface CapabilitiesPayload {
+  topics: SuggestionItem[];
+  archive: {
+    event_count?: number;
+    events?: { name: string; span: string | null; has_burned_area_labels: boolean }[];
+  };
+  approval_required: { hazard_object: string; source: string }[];
+  consent_rule: string;
+}
+
 export interface ChatMessage {
   role: "user" | "agent";
   content: string;
   /** Clarification payload, so agent turns can render their options as buttons */
   clarification?: ClarificationPayload;
+  /** Questions offered under a capability answer. Unlike clarification options
+   *  these are sent on click rather than appended: nothing is being asked, so
+   *  there is no answer to assemble. */
+  suggestions?: SuggestionItem[];
 }
 
 export type SessionStatus = "idle" | "analyzing" | "complete" | "failed";

@@ -42,6 +42,7 @@ export function Sidebar({
   onOpen,
   onRename,
   onDelete,
+  onClearAll,
 }: {
   sessions: SessionSummary[];
   activeId: string | null;
@@ -53,6 +54,7 @@ export function Sidebar({
   onOpen: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
+  onClearAll: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
@@ -75,7 +77,7 @@ export function Sidebar({
     >
       <header className={`flex h-12 items-center border-b border-paper-300 ${collapsed ? "justify-center" : "justify-between pl-3 pr-0.5"}`}>
         {!collapsed && (
-          <h1 className="min-w-0 truncate text-[13px] font-semibold tracking-tight text-ink-900">Wildfire Analyst</h1>
+          <h1 className="min-w-0 truncate text-[13px] font-semibold tracking-tight text-ink-900">FireScope: WildFire Analyst</h1>
         )}
         <button
           type="button"
@@ -96,6 +98,16 @@ export function Sidebar({
         >
           <Icon name="new" />
           {!collapsed && "New Analysis"}
+        </button>
+        <button
+          type="button"
+          onClick={onClearAll}
+          disabled={sessions.length === 0}
+          className={`flex min-h-11 w-full cursor-pointer items-center rounded-lg text-[11.5px] font-medium text-ink-500 transition hover:bg-paper-200 hover:text-ink-900 focus-visible:outline-2 focus-visible:outline-ember-500 disabled:cursor-not-allowed disabled:text-ink-300 disabled:hover:bg-transparent ${collapsed ? "justify-center" : "gap-2 px-2"}`}
+          title={sessions.length ? "Clear all conversations" : "No conversations to clear"}
+        >
+          <Icon name="trash" />
+          {!collapsed && "Clear conversations"}
         </button>
         {!collapsed && (
           <label className="flex min-h-11 items-center gap-2 rounded-lg px-2 text-ink-400 transition hover:bg-paper-100 focus-within:bg-white focus-within:ring-2 focus-within:ring-ember-200">

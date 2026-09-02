@@ -18,6 +18,7 @@ import type {
   RasterLayerResult,
   ArchivedSession,
   SessionSummary,
+  CapabilitiesPayload,
   Taxonomy,
   WorkspaceSnapshot,
 } from "./types";
@@ -41,6 +42,7 @@ async function getJson<T>(path: string): Promise<T> {
 
 export const getHealth = () => getJson<Health>("/api/health");
 export const getTaxonomy = () => getJson<Taxonomy>("/api/taxonomy");
+export const getCapabilities = () => getJson<CapabilitiesPayload>("/api/capabilities");
 
 export interface PublicLayerRequest {
   source: PublicSource;
@@ -146,6 +148,14 @@ export async function renameSession(sessionId: string, title: string): Promise<v
     body: JSON.stringify({ title }),
   });
   if (!res.ok) throw new Error(`Could not rename session: HTTP ${res.status}`);
+}
+
+/** Remove every stored conversation. Returns how many there were. */
+export async function clearSessions(): Promise<number> {
+  const res = await fetch(`${API_BASE}/api/sessions`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Could not clear conversations: HTTP ${res.status}`);
+  const body = (await res.json()) as { deleted?: number };
+  return body.deleted ?? 0;
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {

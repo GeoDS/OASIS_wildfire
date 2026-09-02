@@ -111,17 +111,27 @@ function coordinates(value: unknown): [number, number][] {
   return value.flatMap(coordinates);
 }
 
+// A single pass, not `Math.min(...points)`. Spreading an array into a call
+// passes one argument per element, so a layer with enough vertices overflows
+// the call stack rather than returning a wrong answer: 237 national fire
+// perimeters carry over a million coordinates and crashed every render.
 function layerBounds(layer: LayerResult): [number, number, number, number] | null {
-  const points = (layer.geojson.features as GeoFeature[]).flatMap((feature) =>
-    coordinates(feature.geometry?.coordinates),
-  );
-  if (!points.length) return null;
-  return [
-    Math.min(...points.map(([lon]) => lon)),
-    Math.min(...points.map(([, lat]) => lat)),
-    Math.max(...points.map(([lon]) => lon)),
-    Math.max(...points.map(([, lat]) => lat)),
-  ];
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  let seen = 0;
+  for (const feature of layer.geojson.features as GeoFeature[]) {
+    for (const [lon, lat] of coordinates(feature.geometry?.coordinates)) {
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+      if (lon < west) west = lon;
+      if (lat < south) south = lat;
+      if (lon > east) east = lon;
+      if (lat > north) north = lat;
+      seen += 1;
+    }
+  }
+  return seen ? [west, south, east, north] : null;
 }
 
 function formatValue(value: unknown, unit: string | null) {

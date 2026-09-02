@@ -35,18 +35,21 @@ def list_public_data_sources() -> dict:
 
 @mcp.tool()
 async def fetch_public_geojson(
-    source: Literal["weather", "air_quality", "wfigs", "hmsfire", "fire_history"],
+    source: Literal["weather", "air_quality", "wfigs", "hmsfire", "fire_history", "firms"],
     day: str | None = None,
     latitude: float | None = None,
     longitude: float | None = None,
     start_year: int = 2000,
+    national: bool = False,
 ) -> dict:
     """Fetch one allow-listed source as GeoJSON with explicit status metadata.
 
     Parameters only apply to their relevant source: ``day`` (YYYYMMDD) for
     ``hmsfire``; latitude/longitude for point sources; and ``start_year`` for
-    ``fire_history``. Weather points outside the Southern California bbox are
-    rejected. Always inspect ``metadata.status`` before using features.
+    ``fire_history``. ``national`` widens ``wfigs`` from the Southern California
+    demo box to the contiguous United States - a second fixed constant, never a
+    caller-supplied geometry. Weather points outside the Southern California
+    bbox are rejected. Always inspect ``metadata.status`` before using features.
     """
     return await asyncio.to_thread(
         _fetch_public_geojson,
@@ -55,6 +58,7 @@ async def fetch_public_geojson(
         latitude=latitude,
         longitude=longitude,
         start_year=start_year,
+        national=national,
     )
 
 

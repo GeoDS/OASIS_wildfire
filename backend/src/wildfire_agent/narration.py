@@ -13,14 +13,18 @@ exists to avoid.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .capability_overview import FALLBACK_ASKS, fallback_answer
 from .external_sources import catalogue
 from .llm import get_chat_model, is_mock
+
+logger = logging.getLogger(__name__)
 
 #: Numbers written any of the ways prose writes them: 1116, 1,116, 276.9, 88%.
 _NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -192,6 +196,33 @@ idea, do not lecture. The reply is rendered as plain text, so write no markdown:
 no asterisks, backticks, bullets, or headings."""
 
 
+_CAPABILITY_PROMPT = """You are a wildfire geospatial analyst telling a colleague what you can do.
+
+The user asked what this system is for - not about any fire, place, or result.
+Nothing is on their screen and nothing needs to be. Do not describe the map, do
+not say that no analysis is displayed, and do not ask which area they mean.
+
+Rules:
+1. Use only the supplied topics, archive and sources. Invent nothing.
+2. Quote two or three `ask` examples verbatim - that wording is known to work -
+   and list the same ones in `examples`. Not all nine; a full inventory is how a
+   user gives up. Never put a topic marked `follow_up` in `examples`: its
+   wording refers back to an earlier answer, so it means nothing on its own. You
+   may still describe what it does in the prose.
+3. Give the archive count and name two or three fires whose
+   `has_burned_area_labels` is true. One with only active-fire detections cannot
+   answer most of these topics, so offering it sends the user to a dead end.
+4. Say that some sources are fetched only after they approve them, once per
+   source. That is how the system behaves, not an apology.
+5. If they asked something narrower, answer that from the same material instead
+   of reciting everything.
+
+Style: 4-8 sentences of plain English at the expertise level given. Lead with
+what they can ask for. No markdown. Write examples inside a sentence, like: you
+could ask "Show the Woolsey fire on 2018-11-16".
+"""
+
+
 def _with_sources(prompt: str) -> str:
     """Fold the live source catalogue into a prompt.
 
@@ -225,6 +256,25 @@ class _Discussion(BaseModel):
             "Leave empty when the reply is purely definitional and claims "
             "nothing about what is on screen. Do not list something you are "
             "telling the user is absent."
+        ),
+    )
+
+
+class _CapabilityAnswer(BaseModel):
+    """A capability reply plus the examples it led with.
+
+    The examples are reported rather than parsed back out of the prose, so the
+    options offered under the reply are the ones the reply actually named. They
+    are still checked against the declared topics before being offered - see
+    `capability_overview.suggestions_for`.
+    """
+
+    text: str = Field(description="The reply, plain text, no markdown")
+    examples: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The example questions you quoted, copied verbatim from the `ask` "
+            "fields you were given. Two or three. Omit any you did not quote."
         ),
     )
 
@@ -438,3 +488,45 @@ async def discuss(
             continue
         return draft.text.strip()
     return _nothing_to_answer_from(displayed)
+
+
+async def describe_capabilities(
+    *,
+    question: str,
+    facts: Any,
+    expertise: str = "general",
+) -> tuple[str, list[str]]:
+    """Answer "what can you do?" from the declared inventory.
+
+    Deliberately not routed through `discuss`. That prompt is built for a
+    question about work already on screen - it is told to describe what is
+    displayed and instructed *not* to recite standing properties of the archive.
+    Both are right for a discussion turn and exactly wrong here, which is why
+    "what can you do" used to trail off into what was not on the map.
+
+    Returns the reply and the example questions it quoted, so the options offered
+    beneath it are the ones it actually named rather than a second guess.
+    """
+    human = (
+        f"The user asked:\n{question}\n\n"
+        f"Requested expertise level: {expertise}\n\n"
+        f"What this deployment can do:\n{_fact_corpus(facts)}\n\n"
+        "Write the analyst's reply."
+    )
+    try:
+        model = get_chat_model().with_structured_output(_CapabilityAnswer)
+        answer: _CapabilityAnswer = await model.ainvoke(
+            [("system", _with_sources(_CAPABILITY_PROMPT)), ("human", human)]
+        )
+    except Exception:
+        # The question a reviewer asks first must not depend on a model call
+        # landing. A reasoning model can spend its whole completion budget
+        # thinking and return nothing, which arrives as an ordinary exception
+        # and is indistinguishable from an outage - and the demo has to survive
+        # both. Composed from the same facts, so the answer is the same answer.
+        logger.exception("capability narration failed; composing from the facts")
+        return fallback_answer(facts), list(FALLBACK_ASKS)
+    text = answer.text.strip()
+    if not text:
+        return fallback_answer(facts), list(FALLBACK_ASKS)
+    return text, list(answer.examples)

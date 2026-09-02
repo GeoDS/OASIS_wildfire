@@ -20,7 +20,7 @@ from wildfire_agent.contract import (
     ScalarSlot,
     SpatialSlot,
 )
-from wildfire_agent.graph import build_graph
+from wildfire_agent.graph import build_graph, nodes
 from wildfire_agent.graph.models import (
     ClarificationBatch,
     ClarificationInterpretation,
@@ -490,3 +490,161 @@ def test_no_prompt_names_a_real_place():
     for text in sources:
         for name in banned:
             assert name not in text, f"{name!r} is baked into a prompt"
+
+
+class TestASingleOptionIsNotAQuestion:
+    """"What's the population here" was interrupted with a choice about time
+    period - "an official Census count and a newer population estimate are
+    different measures" - when the only source this deployment has publishes
+    exactly one vintage. The user was asked to pick between an option that
+    exists and one that does not.
+
+    The same rule the fetch gate follows: ask only what changes the answer.
+    Where one value is available, settle it and record the assumption.
+    """
+
+    def _slot(self, value: str | None = None, blocking: bool = True) -> ScalarSlot:
+        return ScalarSlot(
+            value=value, confidence=0.0,
+            source="default", is_blocking=blocking, blocking_reason="matrix baseline B",
+        )
+
+    def _contract(self, **slots) -> AnalysisContract:
+        return AnalysisContract(original_request="what's the population here", slots=slots)
+
+    def test_a_place_attribute_question_settles_the_vintage(self):
+        contract = self._contract(time_horizon=self._slot())
+        nodes._settle_place_attribute_time(contract, ("population",))
+
+        slot = contract.slots["time_horizon"]
+        assert slot.is_blocking is False
+        assert "2020-2024" in (slot.value or "")
+        assert slot.source == "agent_inferred"
+
+    def test_the_assumption_is_recorded_where_the_user_can_see_it(self):
+        """Filling a slot on someone's behalf is only acceptable while it stays
+        visible - that is what `assumptions` is for."""
+        contract = self._contract(time_horizon=self._slot())
+        nodes._settle_place_attribute_time(contract, ("medianHouseholdIncome",))
+
+        assert any("2020-2024" in a for a in contract.assumptions)
+        assert any("only" in a.lower() or "one" in a.lower() for a in contract.assumptions)
+
+    def test_a_turn_that_names_no_variable_is_untouched(self):
+        contract = self._contract(time_horizon=self._slot())
+        nodes._settle_place_attribute_time(contract, ())
+
+        assert contract.slots["time_horizon"].is_blocking is True
+        assert contract.assumptions == []
+
+    def test_a_date_the_user_actually_gave_is_never_overwritten(self):
+        """The user's own words outrank an inferred default, here as everywhere."""
+        slot = self._slot(value="2020-09-27", blocking=False)
+        slot.source = "user_stated"
+        contract = self._contract(time_horizon=slot)
+        nodes._settle_place_attribute_time(contract, ("population",))
+
+        assert contract.slots["time_horizon"].value == "2020-09-27"
+        assert contract.assumptions == []
+
+
+class TestPlanningSkipsTheDiscardedModelCall:
+    """The registry's three layers are pinned to Altadena.
+
+    Once the contract's location resolves, `api._run` suppresses them rather
+    than drawing January's Eaton snapshot over a question about another fire.
+    Selecting them anyway cost a model call per turn whose result nobody saw.
+    """
+
+    async def test_a_resolved_location_skips_layer_selection_entirely(self, monkeypatch):
+        from wildfire_agent.contract import (
+            AnalysisContract,
+            ResolvedLocation,
+            ScalarSlot,
+            SpatialSlot,
+        )
+        from wildfire_agent.graph import nodes
+
+        async def fail(*_args, **_kwargs):
+            raise AssertionError("build_plan was called on a turn the renderers answer")
+
+        monkeypatch.setattr(nodes, "build_plan", fail)
+
+        contract = AnalysisContract(
+            original_request="Show the Woolsey fire on 2018-11-16.",
+            hazard_objects=["active_fire"],
+            slots={
+                "location": SpatialSlot(
+                    value="Malibu, CA",
+                    resolved=ResolvedLocation(
+                        center=(-118.80, 34.12), buffer_km=25, bbox=(-119.1, 34.0, -118.5, 34.3)
+                    ),
+                ),
+                "target": ScalarSlot(value="official_fire_perimeters"),
+            },
+        )
+
+        result = await nodes.planning({"contract": contract})
+
+        assert result["plan"].layers == []
+        # Active fire is fully served across the two paths, so silence here is
+        # the correct answer rather than a missing one.
+        assert result["plan"].unmet == []
+
+    async def test_an_unresolved_location_still_runs_the_planner(self, monkeypatch):
+        """The registry path is not deleted, only bypassed where it is moot."""
+        from wildfire_agent.contract import AnalysisContract, ScalarSlot, SpatialSlot
+        from wildfire_agent.graph import nodes
+        from wildfire_agent.planning import ExecutionPlan
+
+        called = []
+
+        async def fake_build_plan(contract):
+            called.append(contract)
+            return ExecutionPlan()
+
+        monkeypatch.setattr(nodes, "build_plan", fake_build_plan)
+
+        contract = AnalysisContract(
+            original_request="Where are the active fires?",
+            hazard_objects=["active_fire"],
+            slots={
+                "location": SpatialSlot(value="somewhere", resolved=None),
+                "target": ScalarSlot(value="official_fire_perimeters"),
+            },
+        )
+
+        await nodes.planning({"contract": contract})
+        assert called
+
+    async def test_a_capability_gap_survives_the_skip(self, monkeypatch):
+        """The one thing this stage still owns on the renderer path.
+
+        Suppressing the whole plan event left `UnmetNeed` with no route to the
+        screen, which is the honesty `docs/02` scenario 3 exists to check.
+        """
+        from wildfire_agent.contract import (
+            AnalysisContract,
+            ResolvedLocation,
+            ScalarSlot,
+            SpatialSlot,
+        )
+        from wildfire_agent.graph import nodes
+
+        contract = AnalysisContract(
+            original_request="Where should people evacuate to?",
+            hazard_objects=["active_fire", "evacuation"],
+            slots={
+                "location": SpatialSlot(
+                    value="Altadena, CA",
+                    resolved=ResolvedLocation(
+                        center=(-118.13, 34.19), buffer_km=15, bbox=(-118.3, 34.1, -117.9, 34.3)
+                    ),
+                ),
+                "target": ScalarSlot(value="official_fire_perimeters"),
+            },
+        )
+
+        result = await nodes.planning({"contract": contract})
+
+        assert [u.hazard_object for u in result["plan"].unmet] == ["evacuation"]

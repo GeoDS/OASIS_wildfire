@@ -10,6 +10,7 @@ import re
 
 from langgraph.types import interrupt
 
+from ..census_acs import provenance as acs_provenance
 from ..contract import (
     AnalysisContract,
     ClarificationQuestion,
@@ -19,7 +20,7 @@ from ..contract import (
 )
 from ..geocoding import DEFAULT_BUFFER_KM, resolve_local_fire, resolve_location
 from ..llm import structured
-from ..planning import build_plan, execute, summarise
+from ..planning import ExecutionPlan, build_plan, deployment_unmet_needs, execute, summarise
 from ..request_intent import requests_fire
 from ..taxonomy import (
     HAZARD_OBJECTS,
@@ -196,6 +197,13 @@ async def task_compiler(state: GoalAgentState) -> dict:
         inherit_time=bool(context_resolution.get("inherited_time")),
     )
 
+    # The resolver already named which place variables this turn is about, and
+    # that travels in `context_resolution`. No new plumbing needed to know that
+    # a time-period question has one answer.
+    _settle_place_attribute_time(
+        contract, tuple(context_resolution.get("requested_variables") or ())
+    )
+
     inherited_location = _inherit_prior_location(
         contract,
         state.get("prior_location"),
@@ -272,6 +280,46 @@ def _inherit_prior_fire_context(
     return True
 
 
+def _settle_place_attribute_time(
+    contract: AnalysisContract, requested_variables: tuple[str, ...]
+) -> None:
+    """Settle the time slot for a question about who lives somewhere.
+
+    "What is the population here" was interrupted with a choice about time
+    period - an official count against a newer estimate - when the only source
+    this deployment has publishes exactly one vintage. That asked the user to
+    pick between an option that exists and one that does not.
+
+    The rule the fetch gate already follows: ask only what changes the answer.
+    Where one value is available, settle it - and record the assumption, because
+    filling a slot on someone's behalf is only acceptable while it stays visible.
+
+    A date the user actually gave is never overwritten. Their own words outrank
+    an inferred default here as everywhere else.
+    """
+    if not requested_variables:
+        return
+    slot = contract.slots.get("time_horizon")
+    if not isinstance(slot, ScalarSlot) or slot.source == "user_stated":
+        return
+    vintage = acs_provenance()["dataset"]
+    slot.value = vintage
+    slot.source = "agent_inferred"
+    slot.confidence = 0.99
+    slot.is_blocking = False
+    slot.blocking_reason = (
+        "The only source for these place attributes publishes one vintage, so there "
+        "is nothing for the user to choose between."
+    )
+    contract.assumptions = [
+        *contract.assumptions,
+        (
+            f"Place attributes are the {vintage}, the only vintage this deployment can "
+            "fetch. No other time period was available to choose."
+        ),
+    ]
+
+
 def _inherit_prior_location(
     contract: AnalysisContract,
     prior_location: SpatialSlot | None,
@@ -328,12 +376,20 @@ def names_a_family(value: str | None, choices: list[DataFamilyChoice]) -> bool:
 
 
 def enforce_family_disambiguation(contract: AnalysisContract) -> list[DataFamilyChoice]:
-    """Resolve data-family choices deterministically or mark them blocking.
+    """Resolve every data-family choice deterministically. Nothing blocks here.
 
-    Active-fire evidence is chosen by backend policy so the fire remains the
-    user's subject and product names never become UI prerequisites. Other
-    genuinely different questions, such as smoke overhead versus air breathed
-    at a ground monitor, still require clarification.
+    Backend policy picks the evidence family so the hazard stays the user's
+    subject and product names never become UI prerequisites: a resident asking
+    whether their neighbourhood burned should not have to adjudicate WFIGS
+    against VIIRS before seeing a map. The choice is recorded as a visible,
+    retractable assumption instead of being asked - disclosure rather than
+    consent. `docs/01-taxonomy.md` section 5.5 has the reasoning and the cost.
+
+    This applies to *all* family choices, smoke included. An earlier version of
+    this docstring claimed plume-versus-monitor questions still interrupted;
+    they do not, and `test_smoke_family_is_also_selected_by_backend` asserts so.
+    Restoring the question for smoke would be worse than leaving it: no smoke
+    plume capability ships, so it would be a question with nothing behind it.
 
     Returns the choices that apply, so the clarification stage can render them.
     """
@@ -720,8 +776,24 @@ async def analysis_contract(state: GoalAgentState) -> dict:
 
 
 async def planning(state: GoalAgentState) -> dict:
-    """Choose which data layers answer the contract. LLM proposes, registry validates."""
+    """Choose which data layers answer the contract. LLM proposes, registry validates.
+
+    Except when the renderer path is going to answer instead. The registry holds
+    three layers pinned to Altadena, so on a question about another fire or
+    another place they are the wrong thing to draw - which is why `api._run`
+    suppresses them once the contract's location resolves. Selecting them anyway
+    spent a model call per turn on a result nobody saw.
+
+    What is still wanted from this stage is the capability gap, and that is a
+    lookup rather than a judgement. See `docs/03-planning-agent.md` section 5.
+    """
     contract: AnalysisContract = state["contract"]
+
+    spatial = contract.spatial()
+    if spatial is not None and spatial.resolved:
+        plan = ExecutionPlan(layers=[], unmet=deployment_unmet_needs(contract))
+        return {"plan": plan, "stage": "execution"}
+
     plan = await build_plan(contract)
     return {"plan": plan, "stage": "execution"}
 

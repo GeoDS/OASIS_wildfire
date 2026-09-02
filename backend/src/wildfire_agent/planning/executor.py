@@ -26,23 +26,63 @@ from .models import ExecutionPlan, LayerResult
 #: browser is the bottleneck, not the file.
 MAX_FEATURES = 1500
 
+#: What a layer's features *are*, by hazard object. The taxonomy's own
+#: vocabulary - `exposure`, `post_fire_debris_flow` - plus the names introduced
+#: for the public MCP layers. `population_exposure` used to sit here as
+#: "affected community"; it is gone twice over. No hazard object of that name
+#: exists, and an intersection is not impact: naming a place "affected" states
+#: the one thing this pipeline refuses to state.
 _RESULT_NOUNS: dict[str, tuple[str, str]] = {
     "burned_area": ("burned-area region", "burned-area regions"),
     "fire_perimeter": ("fire-boundary polygon", "fire-boundary polygons"),
     "satellite_hotspot": ("thermal-anomaly point", "thermal-anomaly points"),
-    "population_exposure": ("affected community", "affected communities"),
+    "post_fire_debris_flow": ("modelled hazard area", "modelled hazard areas"),
+    "exposure": ("Census place", "Census places"),
+}
+
+#: Where one hazard object covers several different claims. Every local place
+#: layer carries `exposure`, but "a place the burned area reaches", "a place
+#: with same-day active-fire signals" and "the nearest place to the footprint"
+#: are three different statements, and the prose must not collapse them.
+_CAPABILITY_NOUNS: dict[str, tuple[str, str]] = {
+    "official_fire_perimeters": ("fire-boundary polygon", "fire-boundary polygons"),
+    "historical_fire_perimeters": ("fire-boundary polygon", "fire-boundary polygons"),
+    "satellite_hotspots": ("thermal-anomaly point", "thermal-anomaly points"),
+    "burned_area_intersecting_place_boundaries": (
+        "place intersecting the burned area",
+        "places intersecting the burned area",
+    ),
+    "active_fire_intersecting_place_boundaries": (
+        "place with same-day active-fire signals",
+        "places with same-day active-fire signals",
+    ),
+    "fire_intersecting_place_boundaries": (
+        "place intersecting the perimeter",
+        "places intersecting the perimeter",
+    ),
+    "burned_area_nearest_place_reference_points": (
+        "nearby place reference point",
+        "nearby place reference points",
+    ),
+    "fire_nearest_place_reference_points": (
+        "nearby place reference point",
+        "nearby place reference points",
+    ),
+    "subject_city_boundary": ("Census place boundary", "Census place boundaries"),
+    "subject_fire_perimeter": ("fire-boundary polygon", "fire-boundary polygons"),
+    "post_fire_debris_flow_hazard_areas": ("modelled hazard area", "modelled hazard areas"),
 }
 
 
 def _result_noun(result: LayerResult, *, plural: bool) -> str:
-    # ``active_fire`` is an analytical concept, not an object type. Its two
-    # available sources represent very different things, so name the mapped
-    # object instead of collapsing both into the vague word “detection”.
-    if result.capability_id in {"official_fire_perimeters", "historical_fire_perimeters"}:
-        return ("fire-boundary polygon", "fire-boundary polygons")[plural]
-    if result.capability_id == "satellite_hotspots":
-        return ("thermal-anomaly point", "thermal-anomaly points")[plural]
-    named = _RESULT_NOUNS.get(result.hazard_object)
+    """What this layer's features are, named rather than counted as "features".
+
+    Capability first, hazard object second. ``active_fire`` is an analytical
+    concept rather than an object type, and ``exposure`` covers three different
+    claims, so the capability is what settles the noun when one hazard object
+    spans several kinds of thing.
+    """
+    named = _CAPABILITY_NOUNS.get(result.capability_id) or _RESULT_NOUNS.get(result.hazard_object)
     if named:
         return named[1 if plural else 0]
     fallback = {

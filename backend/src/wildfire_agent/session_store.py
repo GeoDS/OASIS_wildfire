@@ -158,6 +158,17 @@ class SessionStore:
                 (status, _now(), session_id),
             )
 
+    def clear(self) -> int:
+        """Remove every stored session, returning how many there were.
+
+        Idempotent: clearing an empty store is not a failure, it is a no-op that
+        reports zero. The count is what the caller shows the user before doing
+        it, because this is the one action here that cannot be undone.
+        """
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM sessions")
+        return max(0, cursor.rowcount)
+
     def delete(self, session_id: str) -> bool:
         with self._lock, self._connect() as connection:
             cursor = connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))

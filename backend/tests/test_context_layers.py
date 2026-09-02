@@ -390,3 +390,47 @@ def test_place_layers_name_a_hazard_object_the_taxonomy_actually_declares():
     declared = set(re.findall(r'hazard_object="([a-z_]+)"', source))
     unknown = declared - set(HAZARD_OBJECTS)
     assert not unknown, f"layers claim hazard objects the taxonomy does not declare: {unknown}"
+
+
+class TestThermalDetectionsJoinTheCityAnswer:
+    """WFIGS perimeters are agency-verified and lag. FIRMS detections are hours
+    old and carry FRP - radiated power, the only intensity measure in this
+    deployment. Neither replaces the other, and the answer must not merge them:
+    a thermal anomaly is not a mapped fire.
+    """
+
+    def _firms(self, *frps: float) -> LayerResult:
+        return LayerResult(
+            capability_id="public_firms_point", title="API · NASA FIRMS", hazard_object="satellite_hotspot",
+            geometry_type="Point", caveat="c", feature_count=len(frps), source="NASA FIRMS",
+            as_of="2026-08-26",
+            geojson={"type": "FeatureCollection", "features": [
+                {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-118.1, 34.2]},
+                 "properties": {"frpMw": f, "confidence": "nominal", "acquiredUtc": "2026-08-25 20:19"}}
+                for f in frps]},
+        )
+
+    def test_detections_are_reported_with_their_strongest_intensity(self):
+        status = city_context_status("Altadena", None, None, None, self._firms(4.2, 49.16, 12.0))
+        detail = " ".join(status["details"])
+        assert "3" in detail
+        assert "49.2" in detail or "49.16" in detail
+        assert "MW" in detail
+
+    def test_a_detection_is_never_called_a_fire(self):
+        """Flares, kilns and hot roofs are detected too. The word this pipeline
+        refuses to put on a thermal anomaly is "wildfire"."""
+        status = city_context_status("Altadena", None, None, None, self._firms(4.2))
+        detail = " ".join(status["details"]).lower()
+        assert "thermal" in detail
+        assert "wildfire" not in detail
+
+    def test_no_detections_says_the_window_it_looked_in(self):
+        """"None" is only meaningful beside how far back it looked."""
+        empty = self._firms()
+        status = city_context_status("Altadena", None, None, None, empty)
+        assert any("no thermal" in d.lower() for d in status["details"])
+
+    def test_the_layer_being_absent_is_not_the_same_as_none_detected(self):
+        status = city_context_status("Altadena", None, None, None, None)
+        assert not any("no thermal" in d.lower() for d in status["details"])

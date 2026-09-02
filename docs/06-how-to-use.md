@@ -5,7 +5,7 @@
 > without re-running the pipeline.
 >
 > Every capability listed here was verified end to end against the running
-> backend on 2026-08-24. Anything that does not work is in §9, not omitted.
+> backend on 2026-08-27. Anything that does not work is in §10, not omitted.
 
 ---
 
@@ -18,7 +18,7 @@ Each topic gives four things:
 3. **Data** — which sources it touches, local and external.
 4. **Result** — what comes back, and what it deliberately does not claim.
 
-Two behaviours run through everything:
+Three behaviours run through everything:
 
 - **A follow-up does not re-run the analysis.** Asking what a number means, or
   asking for a figure the result already holds, is answered from what is on
@@ -26,10 +26,109 @@ Two behaviours run through everything:
 - **An external fetch is asked once per session, per source.** Approve it and it
   stays approved; decline it and you are not asked again. The question is only
   put when the answer would actually change.
+- **An approved fetch leaves a record you can point at.** The **Limits** tab
+  shows who authorised it, which source and vintage answered, what it supplied
+  and what is still missing from any source — for example *"At your approval, ACS
+  5-year estimates, 2020-2024 was fetched from the U.S. Census Bureau for 3
+  places… Still unavailable from any source: building footprints, WUI boundary."*
+  A capped fetch says the count is the cap, not the total.
 
 ---
 
-## 1 · Current conditions for a place
+## Start here · What can I ask you?
+
+**Ask**
+```
+What can you do?
+What can I do with you?
+What else can I ask you?
+How can you help me?
+Who are you?
+```
+
+**Does** — Answers from a declared inventory of topics, the archive roster, and
+which sources need approval. No pipeline runs, nothing is geocoded, and the map
+is left exactly as it was — so asking it mid-session does not cost you the
+result you are looking at.
+
+**Data** — `capability_overview.TOPICS` for the topics, the local TS-SatFire
+catalogue for the roster, `RENDERER_COVERAGE` for the approval-gated sources.
+Only the topics are hand-declared; the rest is derived, so the roster cannot go
+stale.
+
+**Result** — Two or three example questions in wording that is known to work,
+the archive as a fixed set with its count, and a plain statement that some
+sources are fetched only after you approve them. Example fires are drawn only
+from events that carry burned-area labels: offering Thomas as a starting point
+would send you to an event that cannot answer most of these questions.
+
+**The same examples are then offered as options.** A `suggestions` event follows
+the answer, carrying exactly the questions the reply quoted — the reply reports
+which ones it used, and each is checked against the declared list before being
+offered. Prose you have to retype; an option is one click from being sent, so
+wording that does not trigger its topic would fail in front of you. Nothing that
+was not declared can be offered, and if the reply named nothing usable the menu
+falls back to three that always work rather than appearing empty.
+
+It is deliberately **not** a `clarification`. Nothing is being asked, and that
+event advances the pipeline stepper — lighting up a stage on a turn that ran
+nothing is the mismatch the Reasoning Process tab exists to prevent.
+
+The same declaration is served at `GET /api/capabilities`, so the starter
+questions shown on an empty conversation can come from the list the agent
+answers from rather than a second copy.
+
+**Why it is routed deterministically.** *"What can you do?"* used to reach the
+discussion prompt, which is written for a result already on screen, and trailed
+off into what was not displayed. *"What can I do with you?"* ran the whole
+pipeline and replied by asking which geographic area was meant. The check reads
+the user's own words before the resolver is consulted — so the answer does not
+depend on how a model classified the turn, and it works under the mock provider.
+
+**Deliberately narrow.** *"What can I do about the debris flow risk?"* is a
+question about a burn scar and goes to §5, not here.
+
+---
+
+## 1 · What is burning right now, nationally
+
+**Ask**
+```
+Are there any ongoing wildfires in the USA?
+What fires are burning right now?
+Is anything burning in the US right now?
+```
+
+**Does** — Answers for the country rather than for a place. Nothing is geocoded:
+the contiguous-US box is a fixed constant, supplied to the pipeline as an
+already-resolved scope, so the contract, the stages and the reasoning panel are
+the real ones rather than a shortcut around them.
+
+**Data** — NIFC WFIGS current interagency perimeters, national extent.
+
+**Result** — How many perimeters are currently published, and the largest few
+with their agency-reported acreage and state. Two things it will not say: that
+this is everything alight — a perimeter appears only once an agency has mapped
+it — and that a fire with no reported acreage is a fire of zero acres.
+
+**Boundaries are simplified to about 1 km** at this scale. 237 perimeters at
+full resolution is 1.1 million coordinates and 40 MB, which is not a slow map
+but a broken one. The layer says so, and the demo scope still draws at full
+resolution.
+
+### Follow-ups
+
+```
+Is there a fire near Altadena right now?
+Which of those is largest?
+```
+
+The first narrows from the country to one place — and answers a different
+question with different sources (§2), which is the point of asking it second.
+
+---
+
+## 2 · Current conditions for a place
 
 **Ask**
 ```
@@ -42,12 +141,30 @@ Is there a fire near Pasadena right now?
 checks whether any agency-mapped fire perimeter currently overlaps that boundary.
 
 **Data** — Nominatim for geocoding · NWS forecast · Open-Meteo air quality ·
-WFIGS current perimeters · TIGER/Line 2025 Places for the boundary.
+WFIGS current perimeters · **NASA FIRMS near-real-time thermal detections** ·
+TIGER/Line 2025 Places for the boundary.
 
-**Result** — Conditions at the resolved city reference point, plus a plain
-statement about perimeter overlap. Absence of an overlap is reported as an
-observation with a shelf life — *"that is the position as last published, not a
-forecast"* — never as safety.
+**Result** — Conditions at the resolved city reference point, a plain statement
+about perimeter overlap, and the satellite thermal detections in scope with the
+strongest FRP among them. Absence of an overlap is reported as an observation
+with a shelf life — *"that is the position as last published, not a forecast"* —
+never as safety.
+
+**The two fire sources are reported side by side and never merged.** An agency
+perimeter is verified and lags; a FIRMS detection is about three hours old and is
+a hot pixel, not a mapped fire. Flares, kilns and industrial heat are detected
+the same way, so the answer says "thermal detections", never "wildfires".
+
+**FRP — fire radiative power, in megawatts — is the only intensity measure in
+this deployment.** Nothing else here says how hard something is burning: HMS
+carries no FRP, and the TS-SatFire archive's active-fire labels are yes/no.
+FIRMS also gives per-detection confidence (low / nominal / high) and the pixel
+footprint, which is only about 1 km at nadir and larger off it.
+
+**Needs `FIRMS_MAP_KEY`.** Free from NASA, held by the backend, never asked of a
+user. Without it the layer returns nothing and says *"this is a gap in this
+deployment, not an absence of fire"* — and a key the service rejects is reported
+as a rejection, not as a network failure or as an empty sky.
 
 ### Follow-ups
 
@@ -57,12 +174,12 @@ How many housing units are there?
 What's the median household income?
 ```
 
-Asking about people or housing offers the Census ACS fill (§3.1). The place
+Asking about people or housing offers the Census ACS fill (§4.1). The place
 polygon already carries its GEOID, so the fill attaches straight to it.
 
 ---
 
-## 2 · A historical fire on one day
+## 3 · A historical fire on one day
 
 **Ask**
 ```
@@ -108,7 +225,7 @@ result already on screen.
 
 ---
 
-## 3 · Which communities the fire reached
+## 4 · Which communities the fire reached
 
 **Ask**
 ```
@@ -168,7 +285,7 @@ says so before you approve it.
 
 ---
 
-## 4 · Post-fire debris-flow hazard
+## 5 · Post-fire debris-flow hazard
 
 **Ask**
 ```
@@ -206,7 +323,7 @@ What does Phase 1 mean?
 
 ---
 
-## 5 · Derived raster analysis
+## 6 · Derived raster analysis
 
 **Ask**
 ```
@@ -230,7 +347,7 @@ cannot support.
 
 ---
 
-## 6 · Fire environment
+## 7 · Fire environment
 
 **Ask**
 ```
@@ -251,11 +368,11 @@ was detected, never what happened or why.
 
 **Not every event supports all three.** Blue Ridge carries no ESRI_LULC and no
 local fire-weather record, and says so plainly rather than substituting
-something else. See §8.
+something else. See §9.
 
 ---
 
-## 7 · What the system holds
+## 8 · What the system holds
 
 **Ask**
 ```
@@ -265,7 +382,10 @@ What's in your archive?
 ```
 
 **Does** — Answers from the session's own record of the local catalogue. No
-pipeline runs and the map is untouched.
+pipeline runs and the map is untouched. Reaching that answer does not depend on
+how the turn happened to be classified: a question about the archive is routed
+there from the user's own words, so the same wording gives the same answer every
+time rather than sometimes asking which area you meant.
 
 **Data** — The TS-SatFire event catalogue, with per-event support read from the
 data rather than inferred from a variable being present.
@@ -276,7 +396,7 @@ any day**; the answer names them rather than letting you find out by asking.
 
 ---
 
-## 8 · What each fire supports
+## 9 · What each fire supports
 
 Verified 2026-08-24. `BA` = burned-area labels exist. `Cities` = places the
 footprint reaches on the last day.
@@ -308,7 +428,7 @@ Fetch it
 **Alisal and Mojave / I-15 demonstrate a fire that reached nobody** — the result
 switches to the nearest places with distances, and says that being nearby is not
 being affected. (The distances are computed and present in the facts; the
-narrated reply does not always list them. See §9.)
+narrated reply does not always list them. See §10.)
 
 **Thomas and Santa Barbara Co. demonstrate an honest gap** — thousands of
 active-fire pixels, no burned-area labels at all. The system says the quantity
@@ -316,7 +436,7 @@ does not exist for that event rather than reporting `0.0 km²` as a measurement.
 
 ---
 
-## 9 · Known limits
+## 10 · Known limits
 
 - **Mojave / I-15 cannot be named.** Its normalised key becomes `mojave i 15`,
   which no natural phrasing produces. Reachable only through the sidebar. The
@@ -337,6 +457,14 @@ does not exist for that event rather than reporting `0.0 km²` as a measurement.
   `backend/data/README.md`.
 - **Historical air quality is unavailable** for archived events; current AQI is
   never substituted for it.
+- **FIRMS is scoped to Southern California.** The national scope covers current
+  agency perimeters only; there is no nationwide thermal-detection answer.
+- **A one-day FIRMS window can read as empty when it is not.** FIRMS counts back
+  from the most recent available date and NRT lags the pass by about three hours,
+  so the default window is three days. A narrower one returned zero on a day when
+  the previous day held dozens.
+- **Debris-flow coverage is Los Angeles County only** — of the nine archived
+  events, only Bobcat and Woolsey are in that service.
 - **The map does not clear on a subject change yet.** The backend now reports
   `turn.subject_changed`; the frontend half is specified in
   [`05-turn-subject-change.md`](05-turn-subject-change.md) and not yet built, so

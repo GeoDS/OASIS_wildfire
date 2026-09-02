@@ -708,7 +708,15 @@ def city_context_status(
     perimeter_layer: LayerResult | None,
     air_layer: LayerResult | None,
     weather_layer: LayerResult | None,
+    firms_layer: LayerResult | None = None,
 ) -> dict[str, Any]:
+    """Current conditions for a place, from sources that answer different things.
+
+    Agency perimeters are verified and lag. FIRMS detections are hours old and
+    carry FRP - radiated power, the only intensity measure in this deployment.
+    They are reported side by side and never merged: a thermal anomaly is not a
+    mapped fire, and the pipeline does not put the word wildfire on one.
+    """
     perimeter_count = perimeter_layer.feature_count if perimeter_layer else 0
     air_feature = (air_layer.geojson.get("features") or [None])[0] if air_layer else None
     air = (air_feature or {}).get("properties") or {}
@@ -732,6 +740,27 @@ def city_context_status(
         )
         evidence = "low"
     details = [f"Current fire perimeters in scope: {perimeter_count}."]
+    if firms_layer is not None:
+        detections = firms_layer.geojson.get("features") or []
+        if detections:
+            powers = [
+                (f.get("properties") or {}).get("frpMw")
+                for f in detections
+                if (f.get("properties") or {}).get("frpMw") is not None
+            ]
+            strongest = f", strongest {max(powers):.1f} MW radiated power" if powers else ""
+            details.append(
+                f"Satellite thermal detections in scope: {len(detections)}{strongest}. "
+                "A thermal anomaly is a hot pixel, not a mapped fire - flares, kilns and "
+                "industrial heat are detected the same way."
+            )
+        else:
+            # "None" only means something beside how far back it looked, and the
+            # layer being absent is a different statement from none detected.
+            details.append(
+                f"No thermal detections in scope over the window checked ({firms_layer.as_of}). "
+                "That is an absence of detections, not a guarantee that nothing is burning."
+            )
     if air.get("usAqi") is not None:
         details.append(
             f"Modeled current U.S. AQI: {air['usAqi']}; PM2.5: {air.get('pm25')} {air.get('pm25Unit', '')}. "

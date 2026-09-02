@@ -90,6 +90,15 @@ export default function Page() {
           onOpen={(id) => { void session.openSession(id); setHistoryOpen(false); }}
           onRename={(id, title) => void session.renameSession(id, title)}
           onDelete={(id) => void session.removeSession(id)}
+          onClearAll={() => {
+            // Names the number, because this is the one action that cannot be
+            // undone and "are you sure?" alone does not say what is at stake.
+            const count = session.sessions.length;
+            const noun = count === 1 ? "conversation" : "conversations";
+            if (!window.confirm(`Delete all ${count} ${noun}? This cannot be undone.`)) return;
+            void session.clearAllSessions();
+            setHistoryOpen(false);
+          }}
         />
       </div>
 

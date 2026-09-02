@@ -34,6 +34,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .analyses import AnalysisMatch
 from .analyses import resolve as resolve_analysis
+from .capability_overview import overview_facts, suggestions_for
 from .config import settings
 from .context_layers import (
     city_context_status,
@@ -47,7 +48,7 @@ from .context_layers import (
     filter_layer_to_bbox,
     filter_layer_to_subject,
 )
-from .contract import AnalysisContract
+from .contract import AnalysisContract, ResolvedLocation, SpatialSlot
 from .conversation import (
     AnalysisRef,
     ConversationContext,
@@ -73,9 +74,9 @@ from .graph import build_graph
 from .graph.build import make_serde
 from .graph.state import STAGE_AGENTS, STAGE_LABELS
 from .llm import check_llm_ready, describe_llm, is_mock
-from .narration import discuss, narrate
+from .narration import describe_capabilities, discuss, narrate
 from .planning import CAPABILITIES, SHOWCASE_AREA, ExecutionPlan
-from .planning.capabilities import missing_variables
+from .planning.capabilities import is_served, missing_variables, unserved_variables
 from .planning.executor import clip_local_layer, validate_bbox
 from .planning.models import LayerResult, LayerVisualization, LegendStop, PopupField
 from .raster_layers import (
@@ -255,7 +256,9 @@ class MessageIn(BaseModel):
     expertise_override: ExpertiseLevel | None = None
 
 
-PublicSource = Literal["weather", "air_quality", "wfigs", "hmsfire", "fire_history"]
+PublicSource = Literal[
+    "weather", "air_quality", "wfigs", "hmsfire", "fire_history", "firms"
+]
 LocalCapability = Literal[
     "official_fire_perimeters",
     "satellite_hotspots",
@@ -456,9 +459,15 @@ async def taxonomy() -> dict:
                 "label": ho.label,
                 "required_variables": list(ho.required_variables),
                 "dataset_families": list(ho.dataset_families),
+                # Registry capability ids, which is what dispatches a layer on
+                # the registry path. Deliberately *not* the answer to "can this
+                # deployment serve it": six hazard objects are served by the
+                # renderer path and hold no capability id at all.
                 "covered_by": sorted(
                     c.id for c in CAPABILITIES.values() if c.hazard_object == ho.id
                 ),
+                "served": is_served(ho.id),
+                "unserved_variables": list(unserved_variables(ho.id)),
                 "family_choices": [
                     {"id": c.id, "label": c.label, "caveat": c.caveat} for c in ho.family_choices
                 ],
@@ -486,6 +495,24 @@ async def taxonomy() -> dict:
             for c in CAPABILITIES.values()
         },
     }
+
+
+@app.get("/api/capabilities")
+async def capabilities() -> dict:
+    """What this deployment can be asked to do, as questions that work.
+
+    Served so the starter questions a user first sees come from the same
+    declaration the agent answers "what can you do" from. The frontend held its
+    own hardcoded trio, which is a second place for the list to be wrong: an
+    example whose wording no longer triggers its topic fails in front of the
+    user, and nothing in the build would have caught it.
+    """
+    try:
+        archive = _archive_summary()
+    except Exception:
+        logger.exception("could not summarise the local fire archive")
+        archive = []
+    return overview_facts(archive)
 
 
 @app.get("/api/schema/contract")
@@ -545,6 +572,12 @@ def _public_layer_results(source: PublicSource, payload: dict) -> list[LayerResu
             "official_fire_perimeters",
             "NIFC",
         ),
+        "firms": (
+            "Point",
+            "NASA FIRMS near-real-time thermal detections",
+            "satellite_hotspots",
+            "NASA FIRMS",
+        ),
     }
     primary_geometry, title, family, provider = defaults[source]
     if not feature_groups:
@@ -562,6 +595,7 @@ def _public_layer_results(source: PublicSource, payload: dict) -> list[LayerResu
             "hmsfire": "satellite_hotspot",
             "wfigs": "fire_perimeter",
             "fire_history": "fire_perimeter",
+            "firms": "satellite_hotspot",
         }[source]
         layers.append(
             LayerResult(
@@ -582,7 +616,7 @@ def _public_layer_results(source: PublicSource, payload: dict) -> list[LayerResu
     return layers
 
 
-async def _fetch_public_mcp(body: PublicLayerIn) -> dict:
+async def _fetch_public_mcp(body: PublicLayerIn, *, national: bool = False) -> dict:
     """Use the same in-process MCP protocol path an LLM client uses."""
     async with Client(public_data_mcp) as client:
         result = await client.call_tool(
@@ -593,6 +627,7 @@ async def _fetch_public_mcp(body: PublicLayerIn) -> dict:
                 "latitude": body.latitude,
                 "longitude": body.longitude,
                 "start_year": body.start_year,
+                "national": national,
             },
         )
     if result.is_error or not result.content:
@@ -627,6 +662,9 @@ async def _automatic_city_context(
             "wfigs": PublicLayerIn(source="wfigs"),
             **bodies,
             "air_quality": PublicLayerIn(source="air_quality", latitude=lat, longitude=lon),
+            # Verified perimeters lag; these are hours old and carry intensity.
+            # Both, never merged.
+            "firms": PublicLayerIn(source="firms"),
         }
     fetched = await asyncio.gather(
         *(_fetch_public_mcp(body) for body in bodies.values()),
@@ -646,6 +684,7 @@ async def _automatic_city_context(
         by_source[source] = layers
 
     perimeter = next(iter(by_source.get("wfigs", [])), None)
+    firms = next(iter(by_source.get("firms", [])), None)
     air = next(iter(by_source.get("air_quality", [])), None)
     weather = next(
         (layer for layer in by_source.get("weather", []) if layer.geometry_type == "Point"),
@@ -655,7 +694,7 @@ async def _automatic_city_context(
     status = (
         city_weather_status(city_name, weather)
         if weather_only
-        else city_context_status(city_name, perimeter, air, weather)
+        else city_context_status(city_name, perimeter, air, weather, firms)
     )
     if subject and not weather_only:
         subject_geojson = json.loads(json.dumps(subject.geojson))
@@ -730,6 +769,209 @@ async def _automatic_city_context(
 def _normalise_incident_name(value: str) -> str:
     ignored = {"fire", "area", "incident"}
     return " ".join(word for word in re.findall(r"[a-z0-9]+", value.lower()) if word not in ignored)
+
+
+#: US-XX in WFIGS. Only the states this demo is likely to surface are spelled
+#: out; anything else falls back to the code, which is still readable.
+_STATE_NAMES = {
+    "US-OR": "Oregon", "US-CA": "California", "US-ID": "Idaho", "US-WA": "Washington",
+    "US-MT": "Montana", "US-NV": "Nevada", "US-AZ": "Arizona", "US-UT": "Utah",
+    "US-CO": "Colorado", "US-WY": "Wyoming", "US-NM": "New Mexico", "US-TX": "Texas",
+    "US-AK": "Alaska", "US-FL": "Florida",
+}
+
+
+def _is_a_new_question(value: str) -> bool:
+    """Whether an unclear reply to an offer is itself a question owed an answer.
+
+    A session parked on a fetch offer read the next message as the answer to it.
+    "How many hazard areas are there?" is neither a yes nor a no, so the offer
+    was put again and the question disappeared - and in a walkthrough that
+    killed every turn after it.
+
+    The bar is deliberately low but not absent: "hmm" is noise and re-asking is
+    the right response to it, while anything with a question's shape gets
+    carried through to the pipeline with the offer still standing.
+    """
+    text = value.strip()
+    if len(text) < 8:
+        return False
+    if text.endswith("?"):
+        return True
+    return bool(
+        re.match(
+            r"\s*(?:what|which|who|where|when|why|how|is|are|was|were|do|does|did|can|show|"
+            r"list|tell|explain|compare)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _asks_national_fire_question(value: str) -> bool:
+    """A question about the country rather than about a place.
+
+    It named no city, so it fell into the pipeline that resolves one, found
+    nothing to geocode and returned nothing at all. WFIGS answers this directly
+    and needs no subject.
+
+    Narrow on purpose: a named place keeps the pipeline that resolves it, and
+    "any fires near Santa Barbara" is not this question.
+    """
+    if re.search(r"\bnear\b|\baround\b", value, re.IGNORECASE):
+        return False
+    scope = r"(?:usa|u\.s\.a?\.?|united states|the us\b|the country|nationwide|anywhere)"
+    burning = r"(?:fires?|wildfires?|burning|blazes?)"
+    return bool(
+        re.search(rf"\b{burning}\b[^?.]{{0,40}}\b{scope}", value, re.IGNORECASE)
+        or re.search(rf"\b{scope}\b[^?.]{{0,40}}\b{burning}\b", value, re.IGNORECASE)
+        or re.search(
+            rf"\b(?:any|are there)\b[^?.]{{0,25}}\b(?:ongoing|active|current)\b[^?.]{{0,15}}"
+            rf"\b{burning}\b",
+            value,
+            re.IGNORECASE,
+        )
+        or re.search(rf"\bwhat\b[^?.]{{0,15}}\b{burning}\b[^?.]{{0,25}}\bright now\b", value, re.IGNORECASE)
+    )
+
+
+def _national_fire_status(features: list[dict[str, Any]]) -> dict[str, Any]:
+    """What agencies currently have mapped, nationally.
+
+    An empty list is about the record, not the country: a perimeter is published
+    after a fire has been mapped, so "none reported" and "nothing burning" are
+    different statements and this never merges them.
+    """
+    ranked = sorted(
+        (
+            (
+                (f.get("properties") or {}).get("attr_IncidentSize"),
+                str((f.get("properties") or {}).get("poly_IncidentName") or "unnamed"),
+                str((f.get("properties") or {}).get("attr_POOState") or ""),
+            )
+            for f in features
+        ),
+        key=lambda item: item[0] or 0,
+        reverse=True,
+    )
+    details = [
+        (
+            "A perimeter appears here once an agency has mapped it, so this is the "
+            "published record and not a complete picture of everything alight."
+        ),
+        "Sizes are the agency's own reported acreage at the last update.",
+    ]
+    if not ranked:
+        return {
+            "status": "national_assessed",
+            "workflow": "national",
+            "message": (
+                "0 current wildfire perimeters are published for the contiguous United "
+                "States right now. That is what agencies have mapped, not a statement "
+                "that nothing is burning."
+            ),
+            "details": details,
+        }
+    named = []
+    for acres, name, state in ranked[:3]:
+        where = _STATE_NAMES.get(state, state.removeprefix("US-")) or "location not reported"
+        # A fire with no reported acreage is not a fire of zero acres.
+        size = f"{acres:,.0f} acres" if acres else "size not yet reported"
+        named.append(f"{name} ({size}, {where})")
+    return {
+        "status": "national_assessed",
+        "workflow": "national",
+        "message": (
+            f"{len(ranked)} current wildfire perimeters are published for the contiguous "
+            f"United States. The largest are {'; '.join(named)}."
+        ),
+        "details": details,
+    }
+
+
+def _asks_archive_question(value: str) -> bool:
+    """A question about what this deployment holds, not about a fire in it.
+
+    The archive rides in the session context, but it was only ever read on a
+    discussion turn, so whether "what fires do you have data for" got answered
+    depended on the resolver's classification. On one run it listed all nine
+    events; on the next it called the same question analysis, ran the pipeline,
+    and asked which geographic area to consider.
+
+    Deliberately narrow. It must not catch a question about a fire - routing
+    "which cities did it reach" here would replace a result with a catalogue.
+    """
+    noun = r"(?:fires?|events?|data|datasets?|archive|database|catalogue|catalog|analyses)"
+    holdings = (
+        r"(?:do you have|you have|you can analys[ei]|you can do|can you analys[ei]|"
+        r"are (?:there|available|in)|available|in your|is in|you cover|you support)"
+    )
+    opener = r"(?:what|which|list|show|tell me)"
+    return bool(
+        re.search(
+            rf"\b{opener}\b[^?.]{{0,40}}\b{noun}\b[^?.]{{0,30}}\b{holdings}\b",
+            value,
+            re.IGNORECASE,
+        )
+        or re.search(rf"\b{holdings}\b[^?.]{{0,25}}\b{noun}\b", value, re.IGNORECASE)
+        or re.search(rf"\bwhat(?:'s| is)?\s+in\s+your\s+{noun}\b", value, re.IGNORECASE)
+        # No archive noun of its own, but no other reading either.
+        or re.search(r"\bwhat can you (?:analys[ei]|do|show me|work with)\b", value, re.IGNORECASE)
+    )
+
+
+def _archive_kind(kind: str, text: str) -> str:
+    """Route an archive question to the answer, never away from one.
+
+    The override only ever moves a turn toward `discussion`, which is where the
+    archive is read. A turn already classified that way is untouched, and a
+    question that is not about the archive keeps whatever the resolver decided.
+    """
+    return "discussion" if kind == "analysis" and _asks_archive_question(text) else kind
+
+
+#: Asking what the system is for. Anchored on the system as the object - "you",
+#: "this tool", "questions I can ask" - because the same verbs point at the
+#: domain just as often. "What can I do about the debris flow" is a question
+#: about a burn scar, and routing it here would answer a hazard question with a
+#: brochure.
+_CAPABILITY_RE = re.compile(
+    r"\b(?:"
+    # "do" with no object, or with the system as the object. Anchored to the end
+    # of the clause: "what can I do about the debris flow" is a hazard question.
+    r"what\s+(?:else\s+)?(?:can|could)\s+(?:i|we|you)\s+do"
+    r"(?:\s+(?:with|using)\s+(?:you|this|it|the\s+\w+))?\s*[?.!]*\s*$"
+    r"|what\s+do\s+you\s+do\b"
+    # Same anchor: "what can I ask about the Woolsey fire" is about a fire.
+    r"|what\s+(?:else\s+)?(?:can|could)\s+(?:i|we)\s+ask(?:\s+you)?\s*[?.!]*\s*$"
+    r"|what\s+(?:other\s+|kinds?\s+of\s+|sort\s+of\s+)?questions?\s+"
+    r"(?:can|could|should)\s+(?:i|we)\s+ask\b"
+    r"|what\s+(?:else\s+)?(?:can|could)\s+you\s+help\s+(?:me|us)?\s*with\b"
+    r"|how\s+(?:can|could)\s+you\s+help\b"
+    r"|what\s+are\s+you\s+(?:capable\s+of|able\s+to\s+do)\b"
+    r"|what\s+are\s+your\s+capabilit"
+    r"|what\s+(?:else\s+)?(?:can|could)\s+this\s+(?:system|tool|app|agent|thing)\s+do\b"
+    r"|who\s+are\s+you\b"
+    r"|what\s+is\s+this\s+(?:system|tool|app|agent|for)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _asks_capability_question(value: str) -> bool:
+    """A question about the system itself, not about a fire or a place.
+
+    The first thing a new user types, and the one question this handled worst.
+    One phrasing reached the discussion prompt, which is written for a result
+    already on screen, and trailed off into what was not displayed. Another ran
+    the whole pipeline and asked which geographic area to consider - an
+    interrogation in answer to "what can I do with you".
+
+    Narrow on purpose. It must not catch a question that merely sounds
+    self-referential: "what can I do about the debris flow risk" is about a burn
+    scar, and the trailing-anchor on the bare "do" branch is what keeps it out.
+    """
+    return bool(_CAPABILITY_RE.search(value.strip()))
 
 
 def _asks_post_fire_risk_question(value: str) -> bool:
@@ -943,6 +1185,66 @@ def _place_shares(layer: LayerResult | None) -> str:
             else f"{name} {share_text}"
         )
     return ", ".join(parts)
+
+
+def _record_fill_on_contract(
+    contract: AnalysisContract,
+    *,
+    source: str,
+    dataset: str,
+    closed: tuple[str, ...],
+    remaining: tuple[str, ...],
+    count: int,
+    unit: tuple[str, str],
+    complete: bool,
+    failed: dict[str, str],
+) -> None:
+    """Put an approved external fetch on the contract, where it can be seen.
+
+    The backend emits `data_fill` with all of this, and no frontend consumes it.
+    So the one capability the review asked to have demonstrated - a person
+    authorising an outside fetch, and the provenance of what came back - left no
+    trace beyond the numbers quietly changing.
+
+    `contract.assumptions` is already rendered under Limits, and `_run` emits
+    `done` carrying this same contract after the render, so recording it here
+    reaches the screen with no frontend change. It belongs there on the merits
+    too: a fetch made on someone's approval is a decision taken on their behalf,
+    which is exactly what that field is for.
+
+    `unit` and `complete` are not decoration. The first version of this sentence
+    called debris-flow polygons "places" and stated a capped 1,500 as though it
+    were the total - the wrong noun and a truncated count reported as a count,
+    both of which are mistakes corrected elsewhere in this file.
+    """
+    noun = unit[0] if count == 1 else unit[1]
+    if closed:
+        note = (
+            f"At your approval, {dataset} was fetched from {source} for "
+            f"{count:,} {noun}, supplying {', '.join(closed)}."
+        )
+        if not complete:
+            note += (
+                f" {count:,} is the fetch limit, not the total the source holds, so treat "
+                "what is drawn as a sample rather than an inventory."
+            )
+    else:
+        note = (
+            f"At your approval, {source} was queried for "
+            f"{', '.join(remaining) or 'these attributes'} and returned nothing that "
+            "could be attached."
+        )
+    if remaining and closed:
+        note += f" Still unavailable from any source: {', '.join(remaining)}."
+    if failed:
+        # A place we could not reach and a place with no residents must not read
+        # alike, on the record as much as in the prose.
+        note += (
+            " Attributes could not be fetched for "
+            + "; ".join(f"{name} ({reason})" for name, reason in failed.items())
+            + "."
+        )
+    contract.assumptions = [*contract.assumptions, note]
 
 
 def _place_facts(
@@ -1381,12 +1683,40 @@ async def rename_session(session_id: str, body: SessionRenameIn) -> dict:
     return {"ok": True}
 
 
+def _forget_session(session_id: str) -> None:
+    """Drop every trace of one session from process memory.
+
+    Fetch decisions and a parked offer are keyed by session id, so leaving them
+    behind means a deleted conversation's approvals outlive the conversation.
+    """
+    _sessions.discard(session_id)
+    _session_contexts.pop(session_id, None)
+    _fill_decisions.pop(session_id, None)
+    _pending_fills.pop(session_id, None)
+
+
+@app.delete("/api/sessions")
+async def clear_sessions() -> dict:
+    """Remove every stored conversation, and say how many that was.
+
+    Idempotent, so a second press is a no-op rather than a 404. The count is
+    what the caller shows before doing it: this is the one action in the API
+    that cannot be undone.
+    """
+    deleted = _session_store.clear()
+    for session_id in list(_sessions):
+        _forget_session(session_id)
+    _session_contexts.clear()
+    _fill_decisions.clear()
+    _pending_fills.clear()
+    return {"deleted": deleted}
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str) -> dict:
     if not _session_store.delete(session_id):
         raise HTTPException(404, "unknown session")
-    _sessions.discard(session_id)
-    _session_contexts.pop(session_id, None)
+    _forget_session(session_id)
     return {"ok": True}
 
 
@@ -1585,6 +1915,17 @@ async def _render_fire_event(
                 # Drawn on the map and stated in the answer. Fetching a layer
                 # the reply never mentions spends the user's approval on
                 # something they cannot tell apart from having declined.
+                _record_fill_on_contract(
+                    contract,
+                    source=str(found.source.get("discovered_via") or "a public ArcGIS catalogue"),
+                    dataset=f"post-fire debris-flow hazard areas for the {fire_name} burn scar",
+                    closed=tuple(found.closed),
+                    remaining=tuple(debris_offer["remaining"]),
+                    count=found.layer.feature_count,
+                    unit=("hazard area", "hazard areas"),
+                    complete=not found.layer.truncated,
+                    failed={},
+                )
                 outcome.fetched["portal_debris_flow"] = _debris_facts(
                     fire_name,
                     drawn=found.layer.feature_count,
@@ -1720,6 +2061,17 @@ async def _render_fire_event(
                             "affected."
                         ),
                     }
+                _record_fill_on_contract(
+                    contract,
+                    source=str(enrichment.source.get("source") or "the Census API"),
+                    dataset=str(enrichment.source.get("dataset") or "ACS estimates"),
+                    closed=tuple(enrichment.closed),
+                    remaining=tuple(offer["remaining"]),
+                    count=enrichment.enriched_count,
+                    unit=("place", "places"),
+                    complete=True,
+                    failed=enrichment.failed,
+                )
                 if enrichment.source or enrichment.failed:
                     # Reported even when nothing came back. An approved fetch
                     # that quietly returned nothing is indistinguishable from a
@@ -1872,6 +2224,17 @@ async def _render_city_context(
             )
             status.setdefault("details", []).append(enrichment.layer.caveat)
             authorised_figures = _authorised_figures(enrichment.layer, only=asked)
+            _record_fill_on_contract(
+                contract,
+                source=str(enrichment.source.get("source") or "the Census API"),
+                dataset=str(enrichment.source.get("dataset") or "ACS estimates"),
+                closed=tuple(enrichment.closed),
+                remaining=tuple(offer["remaining"]),
+                count=enrichment.enriched_count,
+                unit=("place", "places"),
+                complete=True,
+                failed=enrichment.failed,
+            )
             if enrichment.source or enrichment.failed:
                 outcome.fetched["census_acs"] = {
                     "source": enrichment.source.get("source"),
@@ -1906,6 +2269,76 @@ async def _render_city_context(
 
     outcome.summary = response_summary
     outcome.facts = status
+
+
+#: The one scope this deployment answers for that is not a geocoded place.
+#: Recorded as `fixed_scope` rather than a geocoder name, because nothing looked
+#: it up - it is the boundary the national answer is about.
+_CONUS_LOCATION = SpatialSlot(
+    value="Contiguous United States",
+    source="agent_inferred",
+    confidence=0.99,
+    resolved=ResolvedLocation(
+        display_name="Contiguous United States",
+        center=(-98.5, 39.5),
+        bbox=(-125.0, 24.0, -66.5, 49.5),
+        geocoder="fixed_scope",
+    ),
+)
+
+
+async def _render_national(
+    session_id: str, contract: AnalysisContract, body: MessageIn
+) -> AsyncIterator[dict]:
+    """Answer "is anything burning right now" for the country.
+
+    No geocoding, no contract: there is no place to resolve. The one thing this
+    must not do is let an empty published record read as an empty country.
+    """
+    try:
+        payload = await _fetch_public_mcp(PublicLayerIn(source="wfigs"), national=True)
+    except Exception as exc:
+        # An unavailable upstream is valid state, but it is not "no fires".
+        logger.exception("national fire status failed")
+        yield _sse(
+            "error",
+            {
+                "message": f"Current perimeters were unavailable: {exc}",
+                "type": type(exc).__name__,
+            },
+        )
+        return
+
+    features = payload.get("features") or []
+    status = _national_fire_status(features)
+    # Onto the contract, because Limits renders `assumptions` and these two are
+    # the caveats that matter: an empty record is not an empty country, and the
+    # boundary drawn is not the boundary published.
+    contract.assumptions = [
+        *contract.assumptions,
+        *status["details"],
+        (
+            "Perimeter boundaries are simplified to about 1 km for display at national "
+            "scale; the demo scope draws them at full resolution."
+        ),
+    ]
+    yield _sse("contract", _contract_payload(contract))
+    yield _sse("fire_data", status)
+    for layer in _public_layer_results("wfigs", payload):
+        yield _sse("layer", layer.model_dump(mode="json"))
+
+    summary = await narrate(
+        question=body.text,
+        facts=status,
+        fallback=status["message"],
+        expertise=_expertise_label(body.expertise_override),
+    )
+    yield _sse("summary", {"text": summary})
+
+    context = _session_contexts.setdefault(session_id, ConversationContext())
+    context.last_result = status
+    context.remember("user", body.text)
+    context.remember("agent", summary)
 
 
 async def _render_answer(
@@ -1954,6 +2387,7 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
     # Waiting on a fetch decision? Then this message is that decision, and the
     # turn is a re-run of the same question with the answer applied - not a new
     # question that happens to say "yes".
+    pending_to_restate: PendingFill | None = None
     pending = _pending_fills.pop(session_id, None)
     if pending is not None:
         approved = pending.decide(body.text)
@@ -1965,12 +2399,18 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
                 pending.key, bool(approved)
             )
         if approved is None:
-            # Neither agreement nor refusal. Asking again is cheap; acting on a
-            # guess about consent is not, in either direction.
+            # Neither agreement nor refusal. The offer stays open either way,
+            # because consent must never be guessed. What differs is whether
+            # there is a question to answer: a real one is carried through to
+            # the pipeline below, and only noise ends the turn here.
             _pending_fills[session_id] = pending
-            yield _sse("turn", _turn_payload("discussion"))
-            yield _sse("clarification", pending.as_clarification())
-            return
+            if not _is_a_new_question(body.text):
+                yield _sse("turn", _turn_payload("discussion"))
+                yield _sse("clarification", pending.as_clarification())
+                return
+            pending_to_restate = pending
+        else:
+            pending_to_restate = None
         parked = await _graph.aget_state(config)
         contract = parked.values.get("contract")
         if isinstance(contract, AnalysisContract) and contract.ready_for_planning:
@@ -1989,11 +2429,68 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
     snapshot = await _graph.aget_state(config)
     resuming = bool(snapshot.next) and bool(snapshot.tasks and snapshot.tasks[0].interrupts)
 
+    # A question about the system is not a question about a place, and it needs
+    # no model to establish that. Checked before `resolve_turn` for three
+    # reasons: it saves the call, it works under the mock provider where the
+    # resolver deliberately refuses to guess, and the answer must not depend on
+    # how a model happened to classify the turn. "What can I do with you" used
+    # to run the whole pipeline and reply by asking which area was meant.
+    if not resuming and _asks_capability_question(body.text):
+        yield _sse("turn", _turn_payload("discussion"))
+        context = _session_contexts.setdefault(session_id, ConversationContext())
+        try:
+            # An unreadable archive is a thinner answer, not a failed one: the
+            # topics stand on their own and the roster is what needs the files.
+            try:
+                archive = _archive_summary()
+            except Exception:
+                logger.exception("could not summarise the local fire archive")
+                archive = []
+            answer, examples = await describe_capabilities(
+                question=body.text,
+                facts=overview_facts(archive),
+                expertise=_expertise_label(body.expertise_override),
+            )
+        except Exception as exc:
+            logger.exception("capability overview failed")
+            yield _sse(
+                "error",
+                {
+                    "message": f"I could not describe what I can do. ({type(exc).__name__})",
+                    "type": type(exc).__name__,
+                },
+            )
+            return
+        context.remember("user", body.text)
+        context.remember("agent", answer)
+        _session_store.save_context(session_id, context.model_dump(mode="json"))
+        yield _sse("summary", {"text": answer})
+        # Offered after the answer, not instead of it. Deliberately not a
+        # `clarification`: nothing is being asked, and that event advances the
+        # pipeline stepper - lighting up a stage on a turn that ran nothing is
+        # exactly the mismatch the reasoning panel exists to prevent.
+        yield _sse(
+            "suggestions",
+            {"type": "suggestions", "items": suggestions_for(examples)},
+        )
+        return
+
     payload: dict | Command
+    # Assigned on both branches. It used to be set only where a new question is
+    # classified, and read unconditionally after the graph - so answering any
+    # clarification raised `UnboundLocalError` and the turn the user had just
+    # completed died with it. The human-in-the-loop path is the last place that
+    # should fail silently.
+    national = False
     if resuming:
         # Mid-clarification is still the same question; nothing is being replaced.
         yield _sse("turn", _turn_payload("analysis"))
         payload = Command(resume=body.text)
+        # And a national question that stopped to ask something is still a
+        # national question. The words that made it one are on the contract.
+        parked_contract = snapshot.values.get("contract")
+        if isinstance(parked_contract, AnalysisContract):
+            national = _asks_national_fire_question(parked_contract.original_request)
     else:
         context = _session_contexts.setdefault(session_id, ConversationContext())
         try:
@@ -2008,6 +2505,19 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
         # inherited the previous turn's vocabulary does not get to say no.
         if resolution.kind == "discussion" and _asks_post_fire_risk_question(body.text):
             resolution.kind = "analysis"
+
+        # And the same override in the other direction: a question about what
+        # this deployment holds is answered from the archive in context, not by
+        # running the pipeline and asking the user which area they meant.
+        resolution.kind = _archive_kind(resolution.kind, body.text)
+
+        # A question about the country names no place, so geocoding has nothing
+        # to work with. The scope is supplied as a resolved fact instead - the
+        # contiguous-US box is a constant, not a lookup - and everything else
+        # runs normally. The contract and the stages are the real ones: skipping
+        # them produced a right answer with an empty Reasoning panel, and a
+        # fabricated contract would have been worse than an empty one.
+        national = _asks_national_fire_question(body.text)
 
         # Asking in plain words for data to be fetched is an instruction. It was
         # being read as a remark about the map and answered "the analysis does
@@ -2058,7 +2568,7 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
             return
 
         yield _sse("turn", _turn_payload("analysis", subject_changed=_subject_changed(resolution)))
-        prior_location = None
+        prior_location = _CONUS_LOCATION.model_copy(deep=True) if national else None
         prior_contract = snapshot.values.get("contract")
         prior_fire_event_id = (
             context.active_subject.id
@@ -2066,7 +2576,7 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
             else None
         )
         prior_fire_day = context.active_time.selected if context.active_time else None
-        if isinstance(prior_contract, AnalysisContract):
+        if not national and isinstance(prior_contract, AnalysisContract):
             previous_spatial = prior_contract.spatial()
             if previous_spatial and previous_spatial.resolved:
                 prior_location = previous_spatial.model_copy(deep=True)
@@ -2115,8 +2625,21 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
                     and latest_contract.spatial().resolved
                 )
                 plan = update.get("plan")
-                if isinstance(plan, ExecutionPlan) and not automatic_context:
-                    yield _sse("plan", plan.model_dump(mode="json"))
+                if isinstance(plan, ExecutionPlan):
+                    if not automatic_context:
+                        yield _sse("plan", plan.model_dump(mode="json"))
+                    elif plan.unmet:
+                        # The renderer path is answering, so the registry's
+                        # layer selection is not what gets drawn and must not be
+                        # reported as though it were. The capability gap is a
+                        # different matter: "this deployment cannot do that at
+                        # all" is the one thing this stage still owns, and
+                        # suppressing the whole event left it with no route to
+                        # the screen. Layers are stripped; `unmet` travels.
+                        yield _sse(
+                            "plan",
+                            plan.model_copy(update={"layers": []}).model_dump(mode="json"),
+                        )
 
                 # Layers carry full GeoJSON, so each goes out on its own event
                 # rather than in one payload the browser has to swallow whole.
@@ -2132,8 +2655,16 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
 
     final = await _graph.aget_state(config)
     contract = final.values.get("contract")
+    if pending_to_restate is not None and session_id in _pending_fills:
+        # The offer was never answered, so it is put again after the reply - the
+        # user's question got its answer and the decision is still theirs.
+        yield _sse("clarification", pending_to_restate.as_clarification())
+
     if isinstance(contract, AnalysisContract) and not final.next:
-        if contract.ready_for_planning:
+        if contract.ready_for_planning and national:
+            async for event in _render_national(session_id, contract, body):
+                yield event
+        elif contract.ready_for_planning:
             async for event in _render_answer(session_id, contract, body):
                 yield event
         yield _sse("done", _contract_payload(contract))

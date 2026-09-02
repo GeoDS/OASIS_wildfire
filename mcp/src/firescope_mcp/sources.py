@@ -20,9 +20,9 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from .scope import ALTADENA_CENTER, SOCAL_BBOX, scope_metadata
+from .scope import ALTADENA_CENTER, CONUS_BBOX, SOCAL_BBOX, scope_metadata
 
-SourceId = Literal["weather", "air_quality", "wfigs", "hmsfire", "fire_history"]
+SourceId = Literal["weather", "air_quality", "wfigs", "hmsfire", "fire_history", "firms"]
 
 USER_AGENT = os.getenv(
     "FIRESCOPE_MCP_USER_AGENT",
@@ -43,6 +43,18 @@ HMS_FIRE_URL = (
     "https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Fire_Points/Text/"
     "{year}/{month}/hms_fire{day}.txt"
 )
+#: FIRMS answers a bad key with the plain text "Invalid MAP_KEY." - HTTP 400 on
+#: this endpoint and 401 on the availability one. Neither is JSON and neither is
+#: CSV, so the reply must be inspected before it is parsed.
+FIRMS_AREA_URL = (
+    "https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
+    "{key}/{source}/{west},{south},{east},{north}/{days}"
+)
+#: Backend-held, like CENSUS_API_KEY. Free from NASA, and never asked of a user.
+FIRMS_MAP_KEY = os.getenv("FIRMS_MAP_KEY", "")
+#: Suomi-NPP VIIRS: 375 m, the finest resolution FIRMS publishes for this region.
+FIRMS_SOURCE = os.getenv("FIRMS_SOURCE", "VIIRS_SNPP_NRT")
+
 NWS_POINTS_URL = "https://api.weather.gov/points/{latitude},{longitude}"
 AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
@@ -80,6 +92,20 @@ SOURCE_CATALOG: dict[SourceId, dict[str, Any]] = {
         "api_key_required": False,
         "caveat": "Agency-verified perimeters can lag current conditions; empty is valid.",
     },
+    "firms": {
+        "label": "NASA FIRMS near-real-time thermal detections",
+        "provider": "NASA FIRMS (VIIRS S-NPP, 375 m)",
+        "geometry": ["Point"],
+        "temporality": "past 1-5 days, roughly 3 hours behind the satellite pass",
+        "scope": "fixed Southern California bbox",
+        "limit": 2000,
+        "api_key_required": True,
+        "caveat": (
+            "A thermal anomaly is not a wildfire: flares, kilns and hot roofs are "
+            "detected too. Each point is a pixel footprint, not a burned area, and "
+            "FRP measures radiated power at the moment of the pass, not fire size."
+        ),
+    },
     "hmsfire": {
         "label": "NOAA HMS daily satellite thermal detections",
         "provider": "NOAA NESDIS Hazard Mapping System",
@@ -109,6 +135,7 @@ _ALLOWED_HOSTS = {
     "air-quality-api.open-meteo.com",
     "services3.arcgis.com",
     "satepsanone.nesdis.noaa.gov",
+    "firms.modaps.eosdis.nasa.gov",
 }
 
 
@@ -258,13 +285,29 @@ def _arcgis_features(payload: dict) -> list[dict]:
     return features
 
 
-def fetch_wfigs() -> dict:
-    scope = f"Southern California bbox {SOCAL_BBOX.as_list()}"
+def fetch_wfigs(national: bool = False) -> dict:
+    """Current agency wildfire perimeters, in one of two fixed scopes.
+
+    `national` selects the contiguous-US box rather than the demo box. It is a
+    flag over two constants, deliberately, so no caller ever supplies geometry.
+    """
+    box = CONUS_BBOX if national else SOCAL_BBOX
+    # ~1 km. Full-resolution national perimeters are 1.1 million coordinates and
+    # 40 MB, which is not a slow map but a broken one - the browser overflows its
+    # call stack computing bounds. At this scale the simplification is invisible;
+    # at demo scale, where two perimeters sit beside a city boundary, it is not,
+    # so only the national request is generalised.
+    generalise = {"maxAllowableOffset": "0.01"} if national else {}
+    scope = (
+        f"Contiguous United States bbox {box.as_list()}"
+        if national
+        else f"Southern California bbox {box.as_list()}"
+    )
     try:
         payload = _request_json(
             WFIGS_URL,
             params={
-                "geometry": SOCAL_BBOX.arcgis_envelope(),
+                "geometry": box.arcgis_envelope(),
                 "geometryType": "esriGeometryEnvelope",
                 "inSR": "4326",
                 "spatialRel": "esriSpatialRelIntersects",
@@ -277,14 +320,23 @@ def fetch_wfigs() -> dict:
                 "outSR": "4326",
                 "resultRecordCount": "800",
                 "f": "geojson",
+                **generalise,
             },
         )
         features = _arcgis_features(payload)
         truncated = len(features) >= 800
         notice = "Result reached the 800-feature display cap." if truncated else None
-        return _feature_collection(
+        collection = _feature_collection(
             "wfigs", features[:800], scope=scope, notice=notice, truncated=truncated
         )
+        if national:
+            # A drawn boundary that is not the published boundary must say so.
+            collection["metadata"]["caveat"] = (
+                f"{collection['metadata']['caveat']} Boundaries are simplified to about "
+                "1 km for display at national scale; use the demo scope for a perimeter "
+                "drawn at full resolution."
+            )
+        return collection
     except Exception as exc:  # noqa: BLE001 - source failure must remain data
         return _error_collection("wfigs", exc, scope=scope)
 
@@ -421,6 +473,144 @@ _WIND_BEARINGS = {
     "NW": 315.0,
     "NNW": 337.5,
 }
+
+
+#: VIIRS publishes confidence as a letter, which means nothing on a popup.
+_FIRMS_CONFIDENCE = {"l": "low", "n": "nominal", "h": "high"}
+
+
+def _parse_firms(text: str, *, limit: int = 2000) -> tuple[list[dict], bool]:
+    """Detections inside the demo scope, with intensity and confidence kept.
+
+    `frp` is the one thing this source has that nothing else in the deployment
+    does: radiated power in megawatts, a physical proxy for how hard a pixel is
+    burning. Everything else here already existed as a yes/no detection.
+    """
+    features: list[dict] = []
+    reader = csv.DictReader(io.StringIO(text))
+    for row in reader:
+        try:
+            longitude = float(row["longitude"])
+            latitude = float(row["latitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not SOCAL_BBOX.contains(longitude, latitude):
+            continue
+
+        def _number(field: str, source: dict = row) -> float | None:
+            # `row` bound as a default rather than captured: a closure over the
+            # loop variable is the classic way this silently reads the wrong row.
+            try:
+                return float(source[field])
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        scan, track = _number("scan"), _number("track")
+        raw_confidence = (row.get("confidence") or "").strip().lower()
+        acq_time = (row.get("acq_time") or "").strip().rjust(4, "0")
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [longitude, latitude]},
+                "properties": {
+                    "acquiredUtc": (
+                        f"{(row.get('acq_date') or '').strip()} {acq_time[:2]}:{acq_time[2:]}"
+                    ).strip(),
+                    "satellite": (row.get("satellite") or "").strip() or None,
+                    "instrument": (row.get("instrument") or "").strip() or None,
+                    "frpMw": _number("frp"),
+                    "confidence": _FIRMS_CONFIDENCE.get(raw_confidence, raw_confidence or None),
+                    "brightnessKelvin": _number("bright_ti4") or _number("brightness"),
+                    # Not 1 km except at nadir. A detection is a pixel footprint,
+                    # never a mapped burned area, and the size says how coarse.
+                    "footprintKm2": (
+                        round(scan * track, 4) if scan is not None and track is not None else None
+                    ),
+                    "daynight": {"d": "day", "n": "night"}.get(
+                        (row.get("daynight") or "").strip().lower()
+                    ),
+                    "family": "satellite_hotspots",
+                },
+            }
+        )
+        if len(features) > limit:
+            return features[:limit], True
+    return features, False
+
+
+#: Three, not one. FIRMS counts the window back from the most recent available
+#: date and NRT runs ~3 hours behind the pass, so a one-day query returned zero
+#: detections on a day when the previous day held dozens - a window-boundary
+#: effect that reads as "nothing is burning".
+FIRMS_DEFAULT_DAYS = 3
+
+
+def fetch_firms(days: int = FIRMS_DEFAULT_DAYS) -> dict:
+    """Near-real-time thermal detections, or an honest account of why not.
+
+    Three outcomes are kept apart on purpose. No key configured, a key the
+    service rejected, and no detections in scope look identical to a careless
+    client - and two of them are about us while the third is about the fire.
+    """
+    days = max(1, min(int(days), 5))
+    scope = (
+        f"Southern California bbox {SOCAL_BBOX.as_list()}, the {days} day(s) ending at "
+        "the most recent satellite pass"
+    )
+    if not FIRMS_MAP_KEY:
+        payload = _feature_collection("firms", [], scope=scope)
+        payload["metadata"]["status"] = "not_configured"
+        payload["metadata"]["notice"] = (
+            "No FIRMS_MAP_KEY is configured, so no near-real-time detections were "
+            "requested. This is a gap in this deployment, not an absence of fire."
+        )
+        return payload
+
+    west, south, east, north = SOCAL_BBOX.as_list()
+    url = FIRMS_AREA_URL.format(
+        key=FIRMS_MAP_KEY, source=FIRMS_SOURCE,
+        west=west, south=south, east=east, north=north, days=days,
+    )
+    def _rejected() -> dict:
+        payload = _feature_collection("firms", [], scope=scope)
+        payload["metadata"]["status"] = "rejected"
+        payload["metadata"]["notice"] = (
+            "FIRMS rejected the request; the configured MAP_KEY was not accepted. "
+            "No conclusion about current fire activity can be drawn from this."
+        )
+        return payload
+
+    try:
+        text = _request_bytes(url).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        # The rejection arrives as HTTP 400 with the body "Invalid MAP_KEY." -
+        # not a status a retry helps, and not a network problem. Reading the
+        # body is the only way to tell "our credentials are wrong" from "the
+        # service is down", and those are different things to tell a user.
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - an unreadable body is not a verdict
+            body = ""
+        if "invalid map_key" in body.lower():
+            return _rejected()
+        return _error_collection("firms", exc, scope=scope)
+    except Exception as exc:  # noqa: BLE001 - source failure must remain data
+        return _error_collection("firms", exc, scope=scope)
+
+    if "invalid map_key" in text[:200].lower() or not text.lstrip().lower().startswith("latitude"):
+        # Answered 200, but not with data. Parsing this as CSV would report zero
+        # detections, which states something about the fire rather than about us.
+        return _rejected()
+
+    features, truncated = _parse_firms(text)
+    payload = _feature_collection(
+        "firms", features, scope=scope,
+        notice="Result reached the 2000-feature display cap." if truncated else None,
+        truncated=truncated,
+    )
+    payload["metadata"]["status"] = "ok"
+    return payload
 
 
 def _cardinal_direction(bearing: float) -> str:
@@ -598,6 +788,7 @@ def fetch_public_geojson(
     latitude: float | None = None,
     longitude: float | None = None,
     start_year: int = 2000,
+    national: bool = False,
 ) -> dict:
     """Dispatch one allow-listed source. No arbitrary upstream URL is accepted."""
     if source == "weather":
@@ -605,9 +796,11 @@ def fetch_public_geojson(
     if source == "air_quality":
         return fetch_air_quality(latitude=latitude, longitude=longitude)
     if source == "wfigs":
-        return fetch_wfigs()
+        return fetch_wfigs(national=national)
     if source == "hmsfire":
         return fetch_hmsfire(day)
     if source == "fire_history":
         return fetch_fire_history(start_year)
+    if source == "firms":
+        return fetch_firms()
     raise ValueError(f"Unknown source: {source}")
