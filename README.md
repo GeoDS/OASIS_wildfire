@@ -1,46 +1,135 @@
 # FireScope
 
-A multi-agent geospatial system that **defines the question before it answers it**.
+A multi-agent geospatial system for wildfire analysis. FireScope turns a
+natural-language question into an explicit *Analysis Contract* — what is being
+asked, over which event and time span, using which families of data — and defers
+execution until that contract resolves. Answers come back as qualified claims
+with maps, sources, a reasoning trace, and stated limits.
+
+Stack: FastAPI + LangGraph behind an SSE stream; Next.js, React and MapLibre in
+front.
+
+---
 
 ## How to run
 
-**No API key needed to start.** `LLM_PROVIDER=mock` drives the same pipeline with
-keyword rules, and the UI badges it so a stub never passes for real inference. It
-covers a session's first turn only — any follow-up that resolves *"it"* or *"those
-places"* raises rather than guessing, so demonstrating the conversational chain
-needs a configured provider.
+**Requirements:** Python 3.11+ with [uv](https://docs.astral.sh/uv/), Node 20+
+with [pnpm](https://pnpm.io/).
+
+### 1. Configure a language model
+
+FireScope is provider agnostic — switching providers is an environment change,
+not a code change. Copy the example file and fill in your own provider, model and
+key:
 
 ```bash
-# Backend
-cd backend && uv sync --extra anthropic --extra openai
-cp ../.env.example ../.env
-LLM_PROVIDER=mock uv run uvicorn wildfire_agent.api:app --reload
+cp .env.example .env
+```
 
-# Frontend, second terminal
+```ini
+# anthropic | openai | azure_openai | google_genai | groq | ollama
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5.6-luna
+LLM_TEMPERATURE=0.0
+
+OPENAI_API_KEY=your-key-here
+```
+
+For a local or OpenAI-compatible endpoint, also set `LLM_BASE_URL` (for example
+`http://localhost:11434/v1` for Ollama). `.env` is gitignored and must never be
+committed.
+
+### 2. Download the data archive
+
+**Required.** The fire lifecycle, burn severity (dNBR), NDVI change, land cover,
+spread behaviour, fire weather and community intersection all read a ~1.9 GB
+TS-SatFire subset that is **not redistributed in this repository**.
+
+1. Download it from
+   [this folder](https://drive.google.com/drive/folders/14AgkvlPX2Mae20yv7Gm9NvKPnQEJnx4w).
+2. Place the downloaded directory anywhere outside the checkout.
+3. Set `LOCAL_DATA_ROOT` to that directory — the one that **contains**
+   `full_data/`, not `full_data/` itself.
+
+```bash
+echo 'LOCAL_DATA_ROOT=/absolute/path/to/firescope/data' >> .env
+```
+
+Expected layout:
+
+```
+<LOCAL_DATA_ROOT>/
+  full_data/          per-event daily raster stacks (24461771 is the Bobcat Fire)
+  boundaries/         TIGER/Line California place and state boundaries
+  Info_events.xlsx    event index
+```
+
+`boundaries/` is what the community-intersection questions read; without it the
+lifecycle analyses still work and the city results do not.
+
+Once the backend is running (step 3), verify:
+
+```bash
+curl -s localhost:8000/api/local-data/fire-events
+```
+
+A working setup reports `"event_count": 9`. **A wrong path is not an error** — the
+catalogue is simply empty (`event_count: 0`) and every question about a historical
+fire silently finds no match. This is worth knowing before concluding something is
+broken.
+
+The subset holds nine Southern California events between 2017 and 2021, each a
+daily raster stack on a shared 594 × 596 grid. Layout and band semantics are
+documented in [`backend/data/README.md`](backend/data/README.md).
+
+### 3. Backend
+
+```bash
+cd backend && uv sync --extra anthropic --extra openai
+uv run uvicorn wildfire_agent.api:app --reload
+```
+
+### 4. Frontend, in a second terminal
+
+```bash
 cd frontend && pnpm install
 cp .env.local.example .env.local
 pnpm dev                                    # → http://localhost:3000
 ```
 
-For a real model, set `LLM_PROVIDER` and `LLM_MODEL` in `.env` — `anthropic`,
-`openai`, `azure_openai`, `google_genai`, `groq` and `ollama` all work, with no
-code changes. There is a CLI too:
+### CLI
 
 ```bash
-uv run wildfire -q "Which areas burned in the Eaton Fire around Altadena?"
+uv run wildfire -q "What is the life cycle of the Bobcat Fire?"
 ```
 
-## Download the dataset
+That question reads the archive from step 2.
 
-**The historical fire analyses need a separate archive.** Burn severity, NDVI
-change, land cover, spread behaviour and fire weather all read a ~1.9 GB
-TS-SatFire subset that is not in this repository. Download it from
-[this folder](https://drive.google.com/drive/folders/14AgkvlPX2Mae20yv7Gm9NvKPnQEJnx4w),
-place `full_data/` outside the checkout, and set `LOCAL_DATA_ROOT` to its parent
-directory.
+### Additional keys
 
-Without it the app runs and the catalogue is simply empty — no error, so it looks
-like nothing matched. See [`backend/data/README.md`](backend/data/README.md).
+These unlock individual data sources. The backend starts without them; what
+stops working are the questions that depend on each source.
+
+| Variable | Needed for | Where to get it |
+|---|---|---|
+| `CENSUS_API_KEY` | Census ACS population and vulnerability attributes | [api.census.gov](https://api.census.gov/data/key_signup.html) — free, now required for every query |
+| `FIRMS_MAP_KEY` | NASA FIRMS near-real-time thermal detections | [firms.modaps.eosdis.nasa.gov](https://firms.modaps.eosdis.nasa.gov/api/map_key/) — free |
+| `GEOCODER_USER_AGENT` | Nominatim geocoding | Nominatim's terms require an identifiable contact address |
+
+Without a Census key the API returns an HTML page as HTTP 200 rather than an
+error, so a missing key looks like a malformed response.
+
+---
+
+## Data access
+
+### Live sources
+
+Queried at request time, and offered for approval before any outside fetch:
+NIFC WFIGS perimeters, NASA FIRMS thermal detections, NWS weather, Open-Meteo air
+quality, U.S. Census ACS, and an ArcGIS catalogue searched for post-fire hazard.
+
+---
 
 ## Case study
 
@@ -82,3 +171,22 @@ together with its metadata. **Reasoning** presents the steps taken: interpreting
 the request, resolving scope, selecting evidence, performing the spatial
 analysis, and building the result. **Limits** records the assumptions and caveats
 the session rests on.
+---
+
+## Acknowledgements
+
+This work was conducted at the University of Wisconsin–Madison.
+
+The historical analyses are built on the **TS-SatFire** dataset (Zhao, Gerard and
+Ban), a multi-task satellite image time-series dataset for wildfire detection and
+prediction, distributed at
+<https://www.kaggle.com/datasets/z789456sx/ts-satfire/data>.
+
+FireScope builds on other public data and open infrastructure besides. We thank
+the National Interagency Fire Center for WFIGS perimeters and the
+InteragencyFirePerimeterHistory archive; NASA FIRMS and the
+NOAA NESDIS Hazard Mapping System for satellite thermal detections; the National
+Weather Service and Open-Meteo for weather and air-quality data; the U.S. Census
+Bureau for American Community Survey estimates; the Los Angeles County Department
+of Public Works for the Eaton Fire perimeter; and OpenStreetMap contributors and
+CARTO for basemap tiles.
