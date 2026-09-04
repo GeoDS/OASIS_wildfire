@@ -1,4 +1,8 @@
-# Wildfire Analyst Agent
+# FireScope
+
+> **Working branch.** Development happens here. The public version — a trimmed
+> README, no contributor or design docs — is on
+> [`main`](https://github.com/GeoDS/OASIS_wildfire/tree/main).
 
 A multi-agent geospatial system that **defines the question before it answers it**.
 
