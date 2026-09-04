@@ -26,6 +26,11 @@ out/
 .vscode/
 *.swp
 
+# Local agent tooling — assistant skills and scratch config. Machine-specific,
+# not needed to build, run or test anything here, and not part of what is
+# distributed.
+.claude/
+
 # Next.js local env
 .env.local
 
