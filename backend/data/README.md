@@ -98,6 +98,8 @@ the code depends on:
 `FirePred` bands 15–19 (forecast) use a different scale from their observed
 counterparts — forecast wind direction runs −89 to 87, which is not a bearing — so
 they are not read. Band 3 (precipitation) reads zero across the Bobcat Fire's dry
-September but carries real values for other events, so it is sampled. See
-`.claude/skills/adding-a-fire-analysis/SKILL.md` before adding anything that
-reads a new band.
+September but carries real values for other events, so it is sampled. Any band
+added later needs those same two checks before anything reads it: that its scale
+and units match the observed counterparts it will be compared against, and that a
+zero is a measurement rather than an absence. Nothing downstream validates
+either.
