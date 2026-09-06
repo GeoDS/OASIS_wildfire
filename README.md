@@ -9,6 +9,8 @@ with maps, sources, a reasoning trace, and stated limits.
 Stack: FastAPI + LangGraph behind an SSE stream; Next.js, React and MapLibre in
 front.
 
+**Video demo:** <https://www.youtube.com/watch?v=RLyjaf-3OBs>
+
 ---
 
 ## How to run
@@ -132,10 +134,6 @@ quality, U.S. Census ACS, and an ArcGIS catalogue searched for post-fire hazard.
 ---
 
 ## Example questions
-
-Every capability is written out as a question you can type in
-[`docs/06-how-to-use.md`](docs/06-how-to-use.md), which also lists what does
-*not* work (§10) rather than omitting it. A representative set follows.
 
 **Start a session.** Answered from a declared inventory — no pipeline runs, and
 the map is left exactly as it was.
