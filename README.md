@@ -131,6 +131,65 @@ quality, U.S. Census ACS, and an ArcGIS catalogue searched for post-fire hazard.
 
 ---
 
+## Example questions
+
+Every capability is written out as a question you can type in
+[`docs/06-how-to-use.md`](docs/06-how-to-use.md), which also lists what does
+*not* work (§10) rather than omitting it. A representative set follows.
+
+**Start a session.** Answered from a declared inventory — no pipeline runs, and
+the map is left exactly as it was.
+
+```
+What can you do?
+What fires do you have data for?
+```
+
+**Live conditions.** Each outside source is offered for approval before it is
+contacted, once per session.
+
+```
+Are there any ongoing wildfires in the USA?
+How is the weather at Altadena?
+Is there a fire near Pasadena right now?
+```
+
+**A historical fire.** Reads the archive from step 2.
+
+```
+Show the lifecycle of the Bobcat Fire on 2020-09-27.
+Show the Woolsey fire on 2018-11-16.
+What about the Alisal fire in 2021?
+```
+
+**Which communities it reached**, and who lives there. The second group needs
+`CENSUS_API_KEY` and is offered rather than fetched — approve it with `Fetch it`.
+
+```
+Which cities did it reach?
+Did the fire get into any populated areas?
+
+How wealthy are those places?
+How many homes are in those cities?
+Who couldn't have driven out?
+```
+
+**Derived analysis and fire environment.**
+
+```
+How badly did the Bobcat fire burn between the first and last day?
+Which direction did the Bobcat fire spread, and how fast?
+What were the fire weather conditions during the Woolsey fire?
+```
+
+**Post-fire hazard.**
+
+```
+Is there a debris flow risk?
+What happens in the rainy season?
+```
+
+
 ## Case study
 
 A single session over the Bobcat Fire (Angeles National Forest, Los Angeles
