@@ -1,9 +1,9 @@
 # FireScope
 
 A multi-agent geospatial system for wildfire analysis. FireScope turns a
-natural-language question into an explicit *Analysis Contract* — what is being
+natural-language question into an explicit *Analysis Defintion* — what is being
 asked, over which event and time span, using which families of data — and defers
-execution until that contract resolves. Answers come back as qualified claims
+execution until that definition resolves. Answers come back as qualified claims
 with maps, sources, a reasoning trace, and stated limits.
 
 Stack: FastAPI + LangGraph behind an SSE stream; Next.js, React and MapLibre in
