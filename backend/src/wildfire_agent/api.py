@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .analyses import AnalysisMatch
+from .analyses import choose as choose_analysis
 from .analyses import resolve as resolve_analysis
 from .capability_overview import overview_facts, suggestions_for
 from .config import settings
@@ -70,10 +71,12 @@ from .exposure import (
     offer_for,
     variables_present,
 )
+from .geocoding import resolve_local_fire
 from .graph import build_graph
 from .graph.build import make_serde
 from .graph.state import STAGE_AGENTS, STAGE_LABELS
-from .llm import check_llm_ready, describe_llm, is_mock
+from .lifecycle import lifecycle_answer
+from .llm import check_llm_ready, describe_llm, is_mock, track_usage, usage_totals
 from .narration import describe_capabilities, discuss, narrate
 from .planning import CAPABILITIES, SHOWCASE_AREA, ExecutionPlan
 from .planning.capabilities import is_served, missing_variables, unserved_variables
@@ -329,6 +332,7 @@ def _remember_completed_analysis(
     spatial_analysis: dict[str, Any] | None,
     result_facts: dict[str, Any] | None = None,
     fetched: dict[str, Any] | None = None,
+    continues_community: bool = False,
 ) -> None:
     """Commit one completed turn to structured analytical memory."""
     context = _session_contexts.setdefault(session_id, ConversationContext())
@@ -374,9 +378,11 @@ def _remember_completed_analysis(
             )
             context.active_layer_ids = result_layer_ids + layer_ids
         else:
+            # Recorded the way it was rendered: the "Fetch it" that answers this
+            # turn's offer is decided from this record.
             operation = (
                 "community_intersection"
-                if _asks_fire_community_question(contract.analysis_request())
+                if _takes_community_branch(contract, continues_community)
                 else "fire_lifecycle"
             )
             context.active_analysis = AnalysisRef(
@@ -930,6 +936,27 @@ def _archive_kind(kind: str, text: str) -> str:
     return "discussion" if kind == "analysis" and _asks_archive_question(text) else kind
 
 
+def _index_change_kind(kind: str, text: str, context: ConversationContext) -> str:
+    """Send a severity or NDVI question about a fire to the computation.
+
+    Neither can be read off another result: the dNBR and the NDVI difference are
+    rasters computed on request, and the life-cycle chart holds burned area, not
+    reflectance. Asked right after the life cycle, "How badly did the Bobcat fire
+    burn between the first and last day?" was called discussion one time in two
+    and answered with burned-area growth from the chart on screen. Only ever moves
+    a turn toward analysis, only when the user's own words name the analysis, and
+    not when that analysis is the one on screen - then discussion is right.
+    """
+    subject = context.active_subject
+    if kind != "discussion" or subject is None or subject.type != "fire_event":
+        return kind
+    spec = choose_analysis(text)
+    if spec is None or spec.notes.get("family") != "index_change":
+        return kind
+    on_screen = context.active_analysis.operation if context.active_analysis else None
+    return kind if spec.id == on_screen else "analysis"
+
+
 #: Asking what the system is for. Anchored on the system as the object - "you",
 #: "this tool", "questions I can ask" - because the same verbs point at the
 #: domain just as often. "What can I do about the debris flow" is a question
@@ -972,6 +999,83 @@ def _asks_capability_question(value: str) -> bool:
     scar, and the trailing-anchor on the bare "do" branch is what keeps it out.
     """
     return bool(_CAPABILITY_RE.search(value.strip()))
+
+
+#: Capitalised words, then "fire": someone naming an incident. Case is what tells
+#: "the Eaton Fire" from "a fire near Eaton". What follows "fire" is checked too,
+#: so "Fire Department" and "fire risk" are not read as incidents.
+_NAMED_FIRE_RE = re.compile(
+    r"\b((?:[A-Z][\w'.-]*\s+){0,3}[A-Z][\w'.-]*)\s+(?:[Ff]ire|FIRE)\b"
+    r"(?!\s+(?i:department|dept|station|season|weather|danger|risk|hazard|ban|"
+    r"district|service|conditions?|index|zone)s?\b)"
+)
+#: Capitalised at the start of a sentence or as a title, but never a fire's name.
+_NOT_A_FIRE_NAME = frozenset(
+    {
+        "what", "which", "who", "where", "when", "why", "how", "is", "are", "was",
+        "were", "did", "does", "do", "show", "tell", "describe", "explain", "compare",
+        "map", "about", "the", "this", "that", "a", "an", "any", "last", "latest",
+        "recent", "big", "wild", "brush", "forest", "house", "grass", "structure",
+        "and", "or", "in", "of",
+    }
+)
+#: A question about now has current data to answer it: perimeters, detections,
+#: conditions. Only the past is the archive's to decline.
+_ABOUT_NOW_RE = re.compile(
+    r"\b(?:now|currently|current|still|today|tonight|ongoing|active|"
+    r"this (?:week|morning|afternoon|evening))\b",
+    re.IGNORECASE,
+)
+#: Declared wording only: a suggestion is one click from being sent.
+_UNARCHIVED_FIRE_ASKS = (
+    "Show the Woolsey fire on 2018-11-16.",
+    "What fires do you have data for?",
+    "Is there a fire near Altadena right now?",
+)
+
+
+def _unarchived_fire_named(value: str) -> str | None:
+    """The fire a question names when the archive does not hold it.
+
+    "What happened in the Eaton Fire?" was geocoded to Eaton Canyon and answered
+    with today's conditions there - no perimeter, no detections - which reads as
+    an answer about the fire and is not one. "What is the life cycle of the Camp
+    Fire?" asked which Camp Fire was meant. The honest answer to both is that
+    the archive does not hold them.
+
+    Left to the pipeline: a question that also names an archived fire, which it
+    can answer in part, and a question about now, which current data can answer.
+    """
+    if _ABOUT_NOW_RE.search(value) or resolve_local_fire(value) is not None:
+        return None
+    for match in _NAMED_FIRE_RE.finditer(value):
+        words = match.group(1).split()
+        while words and words[0].casefold() in _NOT_A_FIRE_NAME:
+            words.pop(0)
+        if words:
+            return " ".join(words)
+    return None
+
+
+def _unarchived_fire_answer(name: str, question: str, archive: list[dict[str, Any]]) -> str:
+    """Say the fire is not archived and what is, in the question's language."""
+    events = [
+        f"{event['name']} ({event['first_day'][:4]})" if event.get("first_day") else event["name"]
+        for event in archive
+    ]
+    fire = f"{name} Fire"
+    if re.search(r"[\u4e00-\u9fff]", question):
+        held = f"归档里有 {len(events)} 场火：{'、'.join(events)}。" if events else ""
+        return (
+            f"{fire} 不在这里的火灾归档里，所以没法展示它的经过或地图。{held}"
+            "想看现在的火情，可以问某个地点，比如“Altadena 附近有什么火灾？”"
+        )
+    held = f" The archive holds {len(events)} events: {', '.join(events)}." if events else ""
+    return (
+        f"The {fire} isn't in this deployment's fire archive, so I can't show its "
+        f"history or map it.{held} For what is burning now, ask about a place, for "
+        'example "Is there a fire near Altadena right now?"'
+    )
 
 
 def _asks_post_fire_risk_question(value: str) -> bool:
@@ -1097,6 +1201,72 @@ def _asks_fire_community_question(value: str) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+def _continues_community_analysis(
+    session_id: str,
+    contract: AnalysisContract,
+    event_id: str | None,
+    variables: tuple[str, ...],
+) -> bool:
+    """Whether this turn asks about the places the previous turn found.
+
+    Only the community branch offers the Census fetch, and it was entered on
+    `_asks_fire_community_question` over the resolver's rewrite. "How many
+    people live in those cities?" names no verb that rule knows, so the offer
+    hung on the rewrite's wording - "the places reached by" matched, "the
+    community-intersection analysis" did not - and on a miss the reply offered
+    a lookup with nothing to click. The session already knows its last answer
+    was the community intersection for this fire, and that is what decides it.
+
+    The attribute is read from the question the contract answers, not from this
+    turn's text: "Fetch it" re-renders the parked contract and names nothing.
+    """
+    context = _session_contexts.get(session_id)
+    if context is None or not event_id:
+        return False
+    analysis, subject = context.active_analysis, context.active_subject
+    return bool(
+        analysis
+        and analysis.operation == "community_intersection"
+        and subject
+        and subject.type == "fire_event"
+        and subject.id == event_id
+        and (variables or _asked_attributes(contract.original_request))
+    )
+
+
+def _takes_community_branch(contract: AnalysisContract, continues_community: bool) -> bool:
+    """Whether this turn is answered with the places the fire reached.
+
+    The user's own words first, as `analyses.choose` reads them. The rewrite
+    inherits the previous turn's vocabulary: after a cities answer it names "the
+    previous community-intersection analysis", and "burned" is in nearly every
+    question about a fire. So "How badly did the Bobcat fire burn between the
+    first and last day?" got the cities again, and the dNBR it asked for was
+    computed and dropped. The rewrite still carries a short follow-up such as
+    "and on the 15th?", but only when the user's words name no analysis of
+    their own.
+    """
+    if continues_community or _asks_fire_community_question(contract.original_request):
+        return True
+    return (
+        _asks_fire_community_question(contract.analysis_request())
+        and choose_analysis(contract.original_request) is None
+    )
+
+
+def _analysis_headline(result: dict[str, Any]) -> tuple[str, ...]:
+    """The figure an index-change answer exists to report: its mean change.
+
+    Printed as the summary prints it, so a reply that states it is recognised.
+    "How badly did the Bobcat fire burn between the first and last day?" computed
+    mean dNBR 0.383, and the reply said the facts could not quantify how much the
+    burned area grew: the question named two days and the narrator read it as one
+    about area. Only index changes carry `mean_delta`; other analyses keep nothing.
+    """
+    mean = (result.get("statistics") or {}).get("mean_delta")
+    return (f"{abs(mean):.3f}",) if isinstance(mean, (int, float)) else ()
 
 
 def _place_names(layer: LayerResult | None) -> list[str]:
@@ -1742,21 +1912,30 @@ async def post_message(session_id: str, body: MessageIn) -> EventSourceResponse:
 
 
 async def _guarded(stream: AsyncIterator[dict], session_id: str) -> AsyncIterator[dict]:
-    """Turn any escaping exception into a terminal `error` event.
+    """Turn any escaping exception into a terminal `error` event, and meter the turn.
 
     Only the graph loop inside `_run` used to be guarded. A failure in the
     rendering that follows it - a bad day on a raster timeline, an MCP call that
     raised - propagated out of the generator, and the browser saw a truncated
     chunked response: a bare "network error" with nothing to act on.
+
+    It is also the one place every turn passes through, whichever of the several
+    early returns it takes, so it is where token usage is metered. The backend
+    holds the provider key rather than asking a reviewer for theirs, which makes
+    an unmetered turn an unbounded bill.
     """
-    try:
-        async for item in stream:
-            yield item
-        _session_store.mark_status(session_id, "complete")
-    except Exception as exc:
-        logger.exception("session stream failed")
-        _session_store.mark_status(session_id, "failed")
-        yield _sse("error", {"message": str(exc), "type": type(exc).__name__})
+    with track_usage() as usage:
+        try:
+            async for item in stream:
+                yield item
+            _session_store.mark_status(session_id, "complete")
+        except Exception as exc:
+            logger.exception("session stream failed")
+            _session_store.mark_status(session_id, "failed")
+            yield _sse("error", {"message": str(exc), "type": type(exc).__name__})
+        # After the try, not inside a finally: a generator closed early must not
+        # be resumed to emit one more event.
+        yield _sse("usage", usage_totals(usage))
 
 
 @dataclass
@@ -1779,6 +1958,9 @@ class _RenderOutcome:
     #: Place variables this turn asks about, as the resolver named them. Decides
     #: what the answer opens with and what travels into its facts.
     variables: tuple[str, ...] = ()
+    #: The previous turn found the places this fire reached and this one asks
+    #: about them, so it takes the community branch whatever the rewrite says.
+    continues_community: bool = False
     #: An offer to make instead of answering, when data is missing, fetchable,
     #: and not yet decided.
     offer: PendingFill | None = None
@@ -1959,7 +2141,7 @@ async def _render_fire_event(
         elif debris_pending and outcome.decisions.should_ask(debris_pending.key):
             outcome.offer = debris_pending
 
-    community_question = _asks_fire_community_question(contract.analysis_request())
+    community_question = _takes_community_branch(contract, outcome.continues_community)
     asked_attributes = outcome.variables
     # With no variable named, population is the default: it is what the sentence
     # prints and what the fill was offered for. Leaving it empty would strip
@@ -2142,6 +2324,18 @@ async def _render_fire_event(
         fire_data["places"] = _place_facts(
             answer_communities, lead=narrated_attributes, fetched_only=narrated_attributes
         )
+    # Asked about the life cycle in the user's own words: answer from the
+    # rule-based phases instead of the selected day. Gated on that wording (see
+    # `asks_about_lifecycle`), so every other question keeps the facts it had.
+    phases_answer = (
+        None
+        if community_question
+        else lifecycle_answer(contract.original_request, lifecycle.get("lifecycle_analysis"))
+    )
+    if phases_answer:
+        fire_data["message"] = phases_answer["message"]
+        fire_data["lifecycle"] = phases_answer["facts"]
+        details.extend(phases_answer["caveats"])
     fire_data.update({"workflow": "fire", "details": details})
     yield _sse(
         "fire_data",
@@ -2169,12 +2363,20 @@ async def _render_fire_event(
     if active_communities and active_communities.feature_count:
         emitted_layer_ids.append(active_communities.capability_id)
         yield _sse("layer", active_communities.model_dump(mode="json"))
+    # Only when the computed result is the answer: a life-cycle or cities reply
+    # that merely sits beside it is narrated as before.
+    headline = (
+        _analysis_headline(analysis_result)
+        if analysis_result and fire_data["message"] == analysis_result["summary"]
+        else ()
+    )
     response_summary = await narrate(
         question=contract.analysis_request(),
         facts=fire_data,
         fallback=fire_data["message"],
         expertise=_expertise_label(body.expertise_override),
         preserve=authorised_figures,
+        keep=headline,
     )
     yield _sse("summary", {"text": response_summary})
 
@@ -2264,6 +2466,7 @@ async def _render_city_context(
         fallback=status["message"],
         expertise=_expertise_label(body.expertise_override),
         preserve=authorised_figures,
+        keep=tuple(status.get("current_readings") or ()),
     )
     yield _sse("summary", {"text": response_summary})
 
@@ -2352,9 +2555,17 @@ async def _render_answer(
     cannot drift into rendering the same contract differently.
     """
     fire_plan = plan_fire_raster(contract)
+    variables = _question_variables(session_id, contract)
     outcome = _RenderOutcome(
         decisions=_fill_decisions.setdefault(session_id, FillDecisions()),
-        variables=_question_variables(session_id, contract),
+        variables=variables,
+        # Read before `_remember_completed_analysis` replaces the last analysis.
+        continues_community=_continues_community_analysis(
+            session_id,
+            contract,
+            fire_plan.dataset.event_id if fire_plan else None,
+            variables,
+        ),
     )
     renderer = (
         _render_fire_event(contract, fire_plan, body, outcome)
@@ -2378,19 +2589,31 @@ async def _render_answer(
         outcome.analysis,
         result_facts=outcome.facts,
         fetched=outcome.fetched,
+        continues_community=outcome.continues_community,
     )
 
 
 async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
     config = {"configurable": {"thread_id": session_id}}
 
-    # Waiting on a fetch decision? Then this message is that decision, and the
-    # turn is a re-run of the same question with the answer applied - not a new
-    # question that happens to say "yes".
-    pending_to_restate: PendingFill | None = None
+    # Waiting on a fetch decision? A yes or a no is that decision, and the turn
+    # is a re-run of the same question with the answer applied - not a new
+    # question that happens to say "yes". A new question means the user moved
+    # on: the offer is dropped and the question is answered like any other.
     pending = _pending_fills.pop(session_id, None)
     if pending is not None:
         approved = pending.decide(body.text)
+        if approved is None and not _is_a_new_question(body.text):
+            # Noise ("hmm") is neither a decision nor a question: ask again.
+            _pending_fills[session_id] = pending
+            yield _sse("turn", _turn_payload("discussion"))
+            yield _sse("clarification", pending.as_clarification())
+            return
+        # A new question leaves `approved` as None and falls through to the
+        # pipeline below. The offer is not put back and nothing is recorded:
+        # consent was not given and not refused, so the same gap can be offered
+        # again when a question needs it. It used to stay open and re-run the
+        # parked question instead, so the new question was never answered.
         if approved is not None:
             # Settled for the session. The gap this came from is derived from a
             # static table that will report it as open again on the next turn;
@@ -2398,22 +2621,13 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
             _fill_decisions.setdefault(session_id, FillDecisions()).record(
                 pending.key, bool(approved)
             )
-        if approved is None:
-            # Neither agreement nor refusal. The offer stays open either way,
-            # because consent must never be guessed. What differs is whether
-            # there is a question to answer: a real one is carried through to
-            # the pipeline below, and only noise ends the turn here.
-            _pending_fills[session_id] = pending
-            if not _is_a_new_question(body.text):
-                yield _sse("turn", _turn_payload("discussion"))
-                yield _sse("clarification", pending.as_clarification())
-                return
-            pending_to_restate = pending
-        else:
-            pending_to_restate = None
         parked = await _graph.aget_state(config)
         contract = parked.values.get("contract")
-        if isinstance(contract, AnalysisContract) and contract.ready_for_planning:
+        if (
+            approved is not None
+            and isinstance(contract, AnalysisContract)
+            and contract.ready_for_planning
+        ):
             # The contract is already settled and sitting in the checkpointer, so
             # the decision only changes what the rendering fetches. Re-running the
             # graph would re-ask everything it already asked.
@@ -2475,6 +2689,29 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
         )
         return
 
+    # A fire the archive does not hold has one honest answer, and it needs no
+    # model to give it. Same shape as the capability answer above: nothing is
+    # rendered, so the map keeps whatever it was showing.
+    unarchived = None if resuming else _unarchived_fire_named(body.text)
+    if unarchived:
+        yield _sse("turn", _turn_payload("discussion"))
+        context = _session_contexts.setdefault(session_id, ConversationContext())
+        try:
+            archive = _archive_summary()
+        except Exception:
+            logger.exception("could not summarise the local fire archive")
+            archive = []
+        answer = _unarchived_fire_answer(unarchived, body.text, archive)
+        context.remember("user", body.text)
+        context.remember("agent", answer)
+        _session_store.save_context(session_id, context.model_dump(mode="json"))
+        yield _sse("summary", {"text": answer})
+        yield _sse(
+            "suggestions",
+            {"type": "suggestions", "items": suggestions_for(_UNARCHIVED_FIRE_ASKS)},
+        )
+        return
+
     payload: dict | Command
     # Assigned on both branches. It used to be set only where a new question is
     # classified, and read unconditionally after the graph - so answering any
@@ -2510,6 +2747,10 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
         # this deployment holds is answered from the archive in context, not by
         # running the pipeline and asking the user which area they meant.
         resolution.kind = _archive_kind(resolution.kind, body.text)
+
+        # Severity and NDVI change are computed, never read off the chart on
+        # screen, so naming one is a request to compute it.
+        resolution.kind = _index_change_kind(resolution.kind, body.text, context)
 
         # A question about the country names no place, so geocoding has nothing
         # to work with. The scope is supplied as a resolved fact instead - the
@@ -2655,10 +2896,6 @@ async def _run(session_id: str, body: MessageIn) -> AsyncIterator[dict]:
 
     final = await _graph.aget_state(config)
     contract = final.values.get("contract")
-    if pending_to_restate is not None and session_id in _pending_fills:
-        # The offer was never answered, so it is put again after the reply - the
-        # user's question got its answer and the decision is still theirs.
-        yield _sse("clarification", pending_to_restate.as_clarification())
 
     if isinstance(contract, AnalysisContract) and not final.next:
         if contract.ready_for_planning and national:

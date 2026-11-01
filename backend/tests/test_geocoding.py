@@ -19,6 +19,9 @@ def test_local_fire_name_resolves_from_catalog_before_place_geocoding(monkeypatc
     dataset = SimpleNamespace(
         event_name="Bobcat Fire area",
         spatial_scope="Angeles NF | 34.33, -117.93",
+        variables=["VIIRS_Day"],
+        time_start="2020-09-04",
+        time_end="2020-09-27",
     )
     monkeypatch.setattr(
         "wildfire_agent.geocoding.scan_local_data",

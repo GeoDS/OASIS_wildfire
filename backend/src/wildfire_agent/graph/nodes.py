@@ -18,7 +18,7 @@ from ..contract import (
     ScalarSlot,
     SpatialSlot,
 )
-from ..geocoding import DEFAULT_BUFFER_KM, resolve_local_fire, resolve_location
+from ..geocoding import DEFAULT_BUFFER_KM, local_fire_period, resolve_local_fire, resolve_location
 from ..llm import structured
 from ..planning import ExecutionPlan, build_plan, deployment_unmet_needs, execute, summarise
 from ..request_intent import requests_fire
@@ -203,6 +203,7 @@ async def task_compiler(state: GoalAgentState) -> dict:
     _settle_place_attribute_time(
         contract, tuple(context_resolution.get("requested_variables") or ())
     )
+    _settle_archived_fire_time(contract)
 
     inherited_location = _inherit_prior_location(
         contract,
@@ -317,6 +318,38 @@ def _settle_place_attribute_time(
             f"Place attributes are the {vintage}, the only vintage this deployment can "
             "fetch. No other time period was available to choose."
         ),
+    ]
+
+
+def _settle_archived_fire_time(contract: AnalysisContract) -> None:
+    """Settle the time slot for a named archived fire: its archived record.
+
+    "Which way did the Blue Ridge Fire spread?" was interrupted to ask which
+    period to use. The archive holds one record per event, so the period of
+    "the fire" has one answer, and the same rule as `_settle_place_attribute_time`
+    applies: ask only what changes the answer, and record the assumption.
+
+    Only a slot still waiting on the user is filled. A day or range the user
+    or the compiler already put there is left alone.
+    """
+    slot = contract.slots.get("time_horizon")
+    if not isinstance(slot, ScalarSlot) or not slot.needs_clarification:
+        return
+    period = local_fire_period(contract.analysis_request())
+    if period is None:
+        return
+    start, end = period
+    slot.value = f"{start} to {end}"
+    slot.source = "agent_inferred"
+    slot.confidence = 0.95
+    slot.is_blocking = False
+    slot.blocking_reason = (
+        "The request names an archived fire event, and the archive holds one record "
+        "for it, so there is no period for the user to choose between."
+    )
+    contract.assumptions = [
+        *contract.assumptions,
+        f"Time period not stated: using the event's archived record, {start} to {end}.",
     ]
 
 

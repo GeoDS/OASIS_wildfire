@@ -48,7 +48,7 @@ _WEATHER = re.compile(
 
 def _compile_index(operation: str):
     def compile_for(request: str, fire_plan, *, original: str | None = None):
-        return compile_raster_analysis(request, fire_plan, operation=operation)
+        return compile_raster_analysis(request, fire_plan, operation=operation, original=original)
 
     return compile_for
 

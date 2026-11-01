@@ -390,6 +390,20 @@ def verify_preserved(text: str, required: tuple[str, ...]) -> str:
     return text
 
 
+def verify_kept(text: str, required: tuple[str, ...]) -> str:
+    """Return `text` unchanged, or raise if it left out any required reading.
+
+    Unlike `verify_preserved`, every one is needed: these are the few current
+    readings a "right now" question about a place is answered with. A reply that
+    kept the caveats and dropped the weather was the failure this guards.
+    """
+    written = _figures(text)
+    missing = [reading for reading in required if not _figures(reading) <= written]
+    if missing:
+        raise NarrationRejected(f"left out current readings: {missing}")
+    return text
+
+
 async def narrate(
     *,
     question: str,
@@ -397,6 +411,7 @@ async def narrate(
     fallback: str,
     expertise: str = "general",
     preserve: tuple[str, ...] = (),
+    keep: tuple[str, ...] = (),
 ) -> str:
     """Re-word computed facts as an answer to `question`.
 
@@ -425,10 +440,15 @@ async def narrate(
             f"agreed, so every one of them must appear in your reply: {', '.join(preserve)}. "
             "Take an extra sentence or two if you need it; carry their caveat with them.\n\n"
         )
+    if keep:
+        human += (
+            "These current readings are what the place is like right now; state each of "
+            f"them, whatever else you leave out: {', '.join(keep)}.\n\n"
+        )
     human += "Answer the question."
     try:
         draft = verify_grounded(await _draft(_with_sources(_SYSTEM_PROMPT), human), [facts, fallback])
-        return verify_preserved(draft, preserve)
+        return verify_kept(verify_preserved(draft, preserve), keep)
     except Exception:  # noqa: BLE001 - rejection, provider error, timeout: all fall back
         return fallback
 

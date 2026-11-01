@@ -65,6 +65,7 @@ EventName = Literal[
     "data_fill",
     "suggestions",
     "summary",
+    "usage",
     "done",
     "error",
 ]
@@ -84,6 +85,7 @@ EVENT_NAMES: tuple[str, ...] = (
     "data_fill",
     "suggestions",
     "summary",
+    "usage",
     "done",
     "error",
 )

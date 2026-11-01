@@ -353,6 +353,69 @@ export interface FireLifecycle {
   source_label: string;
   caveat: string;
   prediction_status: string;
+  /** Rule-based phases over the whole record; null when nothing burned. Absent
+   *  in sessions saved before the backend added it. */
+  lifecycle_analysis?: LifecycleAnalysis | null;
+}
+
+export interface LifecyclePhase {
+  id:
+    | "ignition"
+    | "initial_run"
+    | "sustained"
+    | "peak"
+    | "late"
+    | "slowdown"
+    // Heat-only records (no burned-area labels):
+    | "first_heat"
+    | "peak_heat"
+    | "easing"
+    | "flare_up"
+    | "tailing_off";
+  label: string;
+  start: string;
+  end: string;
+  days: number;
+  new_burned_km2: number;
+  share_of_total_percent: number;
+  daily_km2: [number, number];
+  /** Heat-only records: the day's heat-detection range instead of area. */
+  daily_heat?: [number, number];
+  qualifier: "observed" | "estimated";
+  rule: string;
+  note: string;
+}
+
+export interface LifecycleAnalysis {
+  /** "heat" when the event has no burned-area labels and phases come from heat alone. */
+  basis: "burned_area" | "heat";
+  /** True when the burned-area labels lag the heat and the run is dated from the heat. */
+  burn_dates_lag_heat: boolean;
+  heat_peak_date: string;
+  rules: {
+    rapid_growth_km2_per_day: number;
+    major_run_median_multiple: number;
+    slowdown_share_per_day: number;
+    lag_heat_multiple?: number;
+    lag_labelled_share?: number;
+    lag_peak_heat_share?: number;
+    flare_up_share_of_peak?: number;
+    flare_up_rise?: number;
+  };
+  /** First burned ground, or first heat for a heat-only record. */
+  first_burn_date: string;
+  total_burned_km2: number | null;
+  median_growing_day_km2: number | null;
+  phases: LifecyclePhase[];
+  pre_ignition: {
+    dates: string[];
+    active_pixels: number;
+    in_footprint: number | null;
+    note: string;
+  } | null;
+  record_end: { date: string; active_pixels: number; still_active: boolean; note: string };
+  summary: string;
+  caveats: string[];
 }
 
 export interface FireDataStatus {
@@ -363,6 +426,14 @@ export interface FireDataStatus {
   message: string;
   details?: string[];
   detail?: string;
+  /** Present only when the question asked about the fire's life cycle; the
+   *  answer was built from these phases rather than the selected day. */
+  lifecycle?: {
+    phases: Array<{ label: string; start: string; end: string; note: string }>;
+    before_first_burn: string | null;
+    record_end: string;
+    rules: LifecycleAnalysis["rules"];
+  };
 }
 
 export interface ShowcaseArea {

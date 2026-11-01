@@ -39,6 +39,37 @@ function Empty({ children }: { children: string }) {
   return <p className="rounded-xl border border-dashed border-paper-400 p-4 text-[11px] leading-5 text-ink-400">{children}</p>;
 }
 
+/**
+ * Plain-language steps for an answer built from the life-cycle phases. Used only
+ * when the backend says the answer was built that way (`fireDataStatus.lifecycle`),
+ * so every other result keeps the generic record.
+ */
+function lifecycleReasoning(status: FireDataStatus | null, lifecycle: FireLifecycle | null): string[][] | null {
+  const analysis = lifecycle?.lifecycle_analysis;
+  if (!status?.lifecycle || !lifecycle || !analysis) return null;
+  const { rules } = analysis;
+  const found = ["1", "Found the fire", `${lifecycle.event_name}: ${lifecycle.dates.length} daily satellite images, ${lifecycle.dates[0]} to ${lifecycle.dates.at(-1)}.`];
+  const stops = analysis.record_end.note;
+  if (analysis.basis === "heat") {
+    return [
+      found,
+      ["2", "Counted the heat each day", "This event has no burned-area labels, so the steps use the daily count of satellite heat detections instead. How much ground burned is not known."],
+      ["3", "Split the days into phases with fixed rules", `The peak is the day with the most heat. A later day at least ${Math.round((rules.flare_up_share_of_peak ?? 0.5) * 100)}% as hot as the peak, rising ${rules.flare_up_rise ?? 1.5}× or more from the day before, is a flare-up. The same data always gives the same phases.`],
+      ["4", "Said where the data stops", stops],
+    ];
+  }
+  const lag = analysis.burn_dates_lag_heat
+    ? ` Here the burned-area labels lag the heat, so the main run is dated from the heat peak on ${analysis.heat_peak_date}.`
+    : "";
+  return [
+    found,
+    ["2", "Measured what burned each day", `Added up the satellite's burned-ground labels day by day: ${Math.round(analysis.total_burned_km2 ?? 0).toLocaleString()} km² by ${analysis.record_end.date}.`],
+    ["3", "Split the days into phases with fixed rules", `A day adding ${rules.rapid_growth_km2_per_day} km² or more counts as fast growth. The biggest day is a major run when it is more than ${rules.major_run_median_multiple}× a typical day (${Math.round(analysis.median_growing_day_km2 ?? 0)} km²). The slowdown starts once every remaining day adds less than ${Math.round(rules.slowdown_share_per_day * 100)}% of the total. The same data always gives the same phases.${lag}`],
+    ["4", "Set aside heat that is not this fire", analysis.pre_ignition?.note ?? "No heat was detected before the first burned ground."],
+    ["5", "Said where the data stops", stops],
+  ];
+}
+
 export function ResultDetailsPanel({
   collapsed,
   onCollapsedChange,
@@ -231,13 +262,13 @@ export function ResultDetailsPanel({
 
         {tab === "method" && (
           <div className="space-y-2">
-            {[
+            {(lifecycleReasoning(fireDataStatus, lifecycle) ?? [
               ["1", "Interpreted the request", contract?.restatement ?? contract?.original_request ?? "Waiting for a question"],
               ["2", "Resolved scope and assumptions", contract ? `${contract.filled_ratio * 100}% of required fields resolved; ${contract.assumptions.length} visible assumption(s).` : "No scope resolved yet."],
               ["3", "Selected evidence", plan?.layers.length ? plan.layers.map((item) => `${item.title}: ${item.reason}`).join(" · ") : `${layers.length + rasters.length} source(s) supplied the current view.`],
               ["4", "Filtered and aligned", spatialAnalysis ? spatialAnalysis.operations.map((operation) => operation.type.replaceAll("_", " ")).join(" → ") : layers.length ? `${layers.map((layer) => layer.title).join(" · ")} prepared for display.` : "No filtering result yet."],
               ["5", "Built the visible result", spatialAnalysis?.summary ?? fireContext?.summary ?? fireDataStatus?.message ?? "The map, chart, and data panel update from the same result payload."],
-            ].map(([number, title, detail]) => (
+            ]).map(([number, title, detail]) => (
               <article key={number} className="grid grid-cols-[2rem_1fr] gap-3 rounded-xl border border-paper-300 bg-white p-3"><span className="flex h-8 w-8 items-center justify-center rounded-full bg-ember-100 text-[11px] font-semibold text-ember-600">{number}</span><div><h3 className="text-[11.5px] font-semibold text-ink-900">{title}</h3><p className="mt-1 text-[10.5px] leading-[1.5] text-ink-500">{detail}</p></div></article>
             ))}
             <p className="pt-1 text-[9.5px] leading-[1.5] text-ink-400">This is an auditable record of inputs and operations, not the model’s private chain of thought.</p>

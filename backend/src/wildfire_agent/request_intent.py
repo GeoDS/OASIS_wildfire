@@ -33,6 +33,23 @@ def requests_fire(text: str) -> bool:
     return bool(_FIRE_RE.search(text)) and not explicitly_excludes_fire(text)
 
 
+def names_fire_incident(text: str, name_key: str) -> bool:
+    """Whether ``text`` names the fire ``name_key`` as an incident: its name, then "fire".
+
+    "The San Bernardino fire" is a historical event; "is there a fire near San
+    Bernardino" is a question about now. Read on words alone, so "the Mojave /
+    I-15 fire" pairs the way "the Lake Hughes fire" does - a pattern with
+    literal spaces never matched past the slash and the hyphen.
+
+    ``name_key`` is a normalised fire name: lower-case words, with "fire",
+    "area", "county" and "co" dropped.
+    """
+    if not name_key:
+        return False
+    words = " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+    return bool(re.search(rf"\b{re.escape(name_key)}(?: (?:co|county|area))? fire\b", words))
+
+
 def requests_weather(text: str) -> bool:
     return bool(_WEATHER_RE.search(text))
 

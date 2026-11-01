@@ -16,14 +16,15 @@ from typing import Any
 
 from .config import settings
 from .contract import AnalysisContract
+from .lifecycle import lifecycle_phases
 from .local_catalog import DatasetMetadata, scan_local_data
 from .planning.executor import validate_bbox
 from .planning.models import LayerResult, LayerVisualization, PopupField
-from .request_intent import requests_fire
+from .request_intent import names_fire_incident, requests_fire
 
 _DATE_RE = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})")
 _TOKEN_RE = re.compile(r"[0-9a-f]{32}")
-_PREVIEW_ROOT = Path("/private/tmp/firescope-raster-previews")
+_PREVIEW_ROOT = settings.raster_preview_dir
 _LIFECYCLE_ASSET_RE = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})_(?:active_fire|burned_area)\.png")
 _BOUNDARY_RELATIVE = Path("boundaries/california_state_2025/california_state_boundary_2025.shp")
 _DISPLAY_BANDS = {
@@ -279,14 +280,9 @@ def plan_fire_raster(
         named_fire = bool(re.search(r"\bfire\b", dataset.event_name, re.IGNORECASE))
         # Against the raw request, not `search_text`: that one strips the word
         # "fire" while normalising, so the pairing this looks for is gone by then.
+        # The location step's gazetteer applies the same rule.
         key = _normalise_fire_name(dataset.event_name)
-        named_as_incident = bool(key) and bool(
-            re.search(
-                rf"\b{re.escape(key)}\b(?:\W+(?:co|county|area))?\W+fire\b",
-                request_lower,
-                re.IGNORECASE,
-            )
-        )
+        named_as_incident = names_fire_incident(request, key)
         id_qualified = bool(dataset.event_id and dataset.event_id.lower() in request_lower)
         if not (named_fire or named_as_incident or archive_qualified or id_qualified):
             continue
@@ -459,6 +455,20 @@ def _gdal_python() -> str:
     )
 
 
+#: CACHE_VERSION in scripts/build_fire_lifecycle_cache.py. A cache written by an
+#: older builder is rebuilt rather than served, since its PNGs would quietly keep
+#: the old styling.
+_LIFECYCLE_CACHE_VERSION = 3
+
+
+def _lifecycle_cache_is_current(metadata: Path) -> bool:
+    try:
+        payload = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return payload.get("cache_version") == _LIFECYCLE_CACHE_VERSION
+
+
 def _lifecycle_metadata_path(event: RasterDataset) -> Path:
     if not event.event_id:
         raise RasterLayerError("The selected raster series has no event id")
@@ -471,7 +481,7 @@ def _lifecycle_metadata_path(event: RasterDataset) -> Path:
         raise RasterLayerError("The selected TS-SatFire event directory is unavailable")
     output_dir = _PREVIEW_ROOT / "lifecycle" / event.event_id
     metadata = output_dir / "metadata.json"
-    if metadata.exists():
+    if metadata.exists() and _lifecycle_cache_is_current(metadata):
         return metadata
     script = Path(__file__).resolve().parents[2] / "scripts" / "build_fire_lifecycle_cache.py"
     if not script.exists():
@@ -489,6 +499,8 @@ def _lifecycle_metadata_path(event: RasterDataset) -> Path:
                 str(latitude),
                 "--center-longitude",
                 str(longitude),
+                # Only reached when the cache is missing or stale.
+                "--overwrite",
             ],
             check=True,
             capture_output=True,
@@ -530,10 +542,14 @@ def render_fire_lifecycle(event_id: str, *, day: str | None = None) -> dict[str,
             "burned_area",
             "Cumulative burned area label",
             "#5b536c",
-            0.78,
+            # Near-opaque: the colours carry the burn date, and at 0.78 the earlier
+            # burn faded into the basemap.
+            0.95,
             (
-                "Cumulative union through this date of TS-SatFire's BA label. "
-                "It is a historical dataset label, not burn severity."
+                "Cumulative union through this date of TS-SatFire's BA label, coloured by "
+                "when each pixel first burned: this date in ember, the three days before "
+                "it in amber, earlier days in grey-violet. It is a historical dataset "
+                "label, not burn severity."
             ),
         ),
         (
@@ -559,7 +575,12 @@ def render_fire_lifecycle(event_id: str, *, day: str | None = None) -> dict[str,
                 "date": selected_day,
                 "display_band": 8 if kind == "burned_area" else 7,
                 "bounds": bounds,
-                "image_url": (f"/api/fire-lifecycle-assets/{event_id}/{selected_day}_{kind}.png"),
+                # The asset route lets browsers cache for an hour; the version
+                # makes a rebuilt cache a new URL instead of a stale image.
+                "image_url": (
+                    f"/api/fire-lifecycle-assets/{event_id}/{selected_day}_{kind}.png"
+                    f"?v={_LIFECYCLE_CACHE_VERSION}"
+                ),
                 "opacity": opacity,
                 "value_range": [0.0, 1.0],
                 "mask": "TS-SatFire event object nearest the catalogue event centre",
@@ -596,6 +617,10 @@ def render_fire_lifecycle(event_id: str, *, day: str | None = None) -> dict[str,
         "prediction_status": (
             "FirePred auxiliary inputs are available, but no trained-model output is loaded."
         ),
+        #: Rule-based phases over the whole record, for a panel to show. Additive:
+        #: no request routes on it, and only a question about the life cycle
+        #: hands it to the narrator (`lifecycle.lifecycle_answer`).
+        "lifecycle_analysis": lifecycle_phases(metadata.get("timeline") or []),
     }
 
 

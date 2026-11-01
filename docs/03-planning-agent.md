@@ -73,11 +73,20 @@ All three are public, need no API key, and are snapshotted into
 
 **Why these three.** Together they put the central claim of the whole system on
 a map for the first time. The confirmed perimeter is one polygon set an agency
-verified. The satellite layer is over a thousand thermal detections, some of
-them coarse GOES pixels, plainly spilling outside that perimeter. Choosing
-between them does not change the resolution of the answer — it changes the
-answer. That is why the choice is made by stated policy and disclosed rather
-than left to a model's judgement — `docs/01` §5.5.
+verified, as of 21 January. The satellite layer is 1,300 thermal detections from
+8-9 January, some of them coarse GOES pixels.
+
+Measured on 2026-08-31, **150 of the 1,300 fall outside the perimeter (11.5%)**
+and the rest inside. An earlier version of this paragraph said they "plainly
+spill outside" it; they do not, and the correction is worth keeping because the
+real relationship makes the point better. The perimeter is thirteen days later
+than the detections and encloses most of them in hindsight, so the comparison is
+temporally mismatched — which is exactly why the two are not a clean and a rough
+version of one answer. They describe different things at different moments.
+Choosing between them does not change the resolution of the answer, it changes
+the answer. That is why the choice is made by stated policy and disclosed rather
+than left to a model's judgement - `docs/01` §5.5. Figures:
+`paper/results/eaton_perimeter_vs_hotspots.json`.
 
 The historical layer carries the same family tag as the current perimeters,
 because it *is* agency-verified polygons; only `temporality` separates them.

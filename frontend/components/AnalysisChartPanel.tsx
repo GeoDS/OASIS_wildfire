@@ -1,5 +1,7 @@
 "use client";
 
+import { LifecyclePhasesSection } from "@/components/LifecyclePhasesSection";
+import { LifecyclePlayButton } from "@/components/LifecyclePlayButton";
 import type {
   FireContext,
   FireLifecycle,
@@ -82,8 +84,13 @@ export function AnalysisChartPanel({
     const max = Math.max(...lifecycle.timeline.map((item) => item.new_burned_km2), 1);
     return (
       <section className="flex h-full min-h-0 flex-col overflow-y-auto bg-white p-3" aria-label="Fire lifecycle chart">
-        <p className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ember-600">Historical progression</p>
-        <h2 className="mt-1 text-[14px] font-semibold text-ink-900">{lifecycle.event_name} lifecycle</h2>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ember-600">Historical progression</p>
+            <h2 className="mt-1 text-[14px] font-semibold text-ink-900">{lifecycle.event_name} lifecycle</h2>
+          </div>
+          <LifecyclePlayButton lifecycle={lifecycle} loading={lifecycleLoading} onDateChange={onDateChange} />
+        </div>
         <div className="mt-3 grid grid-cols-2 gap-2">
           <Metric label="Cumulative burned area" value={`${lifecycle.selected_metrics.cumulative_burned_km2.toLocaleString()} km²`} />
           <Metric label="New on selected day" value={`${lifecycle.selected_metrics.new_burned_km2.toLocaleString()} km²`} hint={lifecycle.selected_date} />
@@ -102,6 +109,13 @@ export function AnalysisChartPanel({
           ))}
         </div>
         <p className="mt-2 text-[10px] text-ink-400">{lifecycleLoading ? "Loading selected day…" : `${lifecycle.dates.length} daily frames · ${lifecycle.dates[0]}–${lifecycle.dates.at(-1)}`}</p>
+        {lifecycle.lifecycle_analysis && (
+          <LifecyclePhasesSection
+            analysis={lifecycle.lifecycle_analysis}
+            selectedDate={lifecycle.selected_date}
+            onDateChange={onDateChange}
+          />
+        )}
       </section>
     );
   }

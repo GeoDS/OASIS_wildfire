@@ -61,12 +61,20 @@ def client(monkeypatch):
     return TestClient(api.app)
 
 
-def _events(response) -> list[tuple[str, dict]]:
+def _events(response, *, metering: bool = False) -> list[tuple[str, dict]]:
+    """Parse an SSE response. Token metering is dropped unless asked for.
+
+    `usage` rides on every turn whatever it did, so a test asserting the shape of
+    a stream is asserting something orthogonal to it. Tests that care about the
+    meter pass `metering=True`.
+    """
     out, event = [], None
     for line in response.text.splitlines():
         if line.startswith("event: "):
             event = line[7:]
         elif line.startswith("data: ") and event:
+            if event == "usage" and not metering:
+                continue
             out.append((event, json.loads(line[6:])))
     return out
 
@@ -1366,8 +1374,9 @@ class TestAnUnclearReplyIsNotSwallowed:
     was re-asked and the question vanished - and in a real walkthrough that
     killed every turn after it.
 
-    The offer stays open, because consent must not be guessed. But the question
-    the user actually asked has to be answered rather than eaten.
+    Consent must not be guessed, but the question the user actually asked has to
+    be answered rather than eaten. Asking it drops the offer without recording a
+    refusal; `test_fetch_offer_flow` covers where the turn goes.
     """
 
     def _pending(self) -> api.PendingFill:
@@ -1816,3 +1825,24 @@ def test_a_capability_answer_survives_a_model_that_returns_nothing(monkeypatch):
     assert "Woolsey Fire" in text
     assert "Are there any ongoing wildfires in the USA?" in text
     assert examples == list(FALLBACK_ASKS)
+
+
+def test_every_turn_reports_what_it_spent(client):
+    """The backend holds the provider key rather than asking a reviewer for
+    theirs, so an unmetered turn is an unbounded bill. Metered in `_guarded`
+    because that is the one place every turn passes through, whichever of the
+    several early returns it takes."""
+    session_id = client.post("/api/sessions").json()["session_id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"text": "Where are the active fires near Altadena?"},
+    )
+    events = _events(response, metering=True)
+
+    usage = [payload for name, payload in events if name == "usage"]
+    assert len(usage) == 1, "exactly one meter reading per turn"
+    assert set(usage[0]) >= {"input_tokens", "output_tokens", "total_tokens", "calls"}
+    # The stub provider makes no real call, so zero calls is the honest reading
+    # here - and the field distinguishes "no call" from "a free call".
+    assert usage[0]["calls"] >= 0
+    assert events[-1][0] == "usage", "the meter closes the stream"

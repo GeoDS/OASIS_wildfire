@@ -1,0 +1,17 @@
+# Keys, local environments and build output stay out of every image.
+**/.env
+**/.env.*
+**/.venv
+**/node_modules
+**/.next
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.tsbuildinfo
+**/.DS_Store
+
+.git
+.claude
+.runtime
+_local
+docs

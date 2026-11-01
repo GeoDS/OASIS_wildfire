@@ -60,6 +60,16 @@ class RasterAnalysisPlan(BaseModel):
 
 
 _DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+#: A day named in the user's own words: "2020-09-15", "Sep 15", "September 15th",
+#: "9/15", "the 15th", "9月15日".
+_NAMED_DAY_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?\b"
+    r"|\b\d{1,2}/\d{1,2}\b"
+    r"|\b\d{1,2}(?:st|nd|rd|th)\b"
+    r"|\d{1,2}月\d{1,2}日",
+    re.IGNORECASE,
+)
 
 
 #: What each operation reads, and how it is described to the user. `variable`
@@ -121,6 +131,7 @@ def compile_raster_analysis(
     fire_plan: FireRasterPlan,
     *,
     operation: str,
+    original: str | None = None,
 ) -> RasterAnalysisPlan | None:
     """Compile one named operation into a data-only execution plan.
 
@@ -128,6 +139,13 @@ def compile_raster_analysis(
     module does not sniff wording: it is handed a name and turns it into a plan,
     which is why a second caller cannot disagree with the first about what the
     user meant.
+
+    `original` is the user's own words. When it names no day, dates in the
+    rewrite are ignored and the record's first and last day apply: after the
+    life-cycle answer the rewrite can call September 6, the first burned ground,
+    "the first day", and "between the first and last day" came back as mean dNBR
+    0.296 one run and 0.383 the next. A day the user named in other words ("Sep
+    15") still arrives as an ISO date through the rewrite.
     """
     if not fire_plan.dataset.event_id:
         return None
@@ -141,7 +159,8 @@ def compile_raster_analysis(
             f"This fire has fewer than two local {spec['variable']} dates for comparison"
         )
 
-    explicit = [day for day in _DATE_RE.findall(request) if day in available]
+    named = original is None or bool(_NAMED_DAY_RE.search(original))
+    explicit = [day for day in _DATE_RE.findall(request) if day in available] if named else []
     if len(explicit) >= 2:
         first_day, last_day = sorted(explicit[:2])
     else:

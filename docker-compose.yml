@@ -1,0 +1,37 @@
+# Run FireScope locally:  docker compose up --build   then open http://localhost:3000
+#
+# Keys come from .env and never enter an image. The TS-SatFire archive is mounted
+# read-only from FIRESCOPE_DATA (default: the directory beside this checkout).
+# Ports bind to 127.0.0.1 only: the API has no authentication.
+name: firescope
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    env_file: .env
+    environment:
+      LOCAL_DATA_ROOT: /data
+      CORS_ORIGINS: http://localhost:3000
+    volumes:
+      - ${FIRESCOPE_DATA:-../data}:/data:ro
+      # A volume rather than ./.runtime: a non-Docker backend may hold that SQLite
+      # file open at the same time, and SQLite locking across the host share is unreliable.
+      - sessions:/app/.runtime
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  sessions:

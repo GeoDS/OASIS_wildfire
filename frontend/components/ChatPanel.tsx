@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { ExpertisePicker } from "./ExpertisePicker";
 import { getCapabilities } from "@/lib/api";
+import { withPickedOption } from "@/lib/composer";
 import type {
   ChatMessage,
   ClarificationQuestion,
@@ -164,9 +165,10 @@ export function ChatPanel({
   };
 
   /** Picking an option appends rather than sends, so several answers can go in
-      one reply. Answering everything at once is the point - no drip-feeding. */
-  const appendOption = (label: string) => {
-    setDraft((prev) => (prev ? `${prev}; ${label}` : label));
+      one reply. Answering everything at once is the point - no drip-feeding. A
+      second pick from the same question replaces the first. */
+  const pickOption = (options: string[], label: string) => {
+    setDraft((prev) => withPickedOption(prev, options, label));
     textareaRef.current?.focus();
   };
 
@@ -202,7 +204,11 @@ export function ChatPanel({
             <div key={i} className="animate-rise max-w-[95%]">
               <p className="text-[13px] leading-[1.6] text-ink-700">{msg.content}</p>
               {msg.clarification?.questions.map((q) => (
-                <QuestionBlock key={q.slot} question={q} onPick={appendOption} />
+                <QuestionBlock
+                  key={q.slot}
+                  question={q}
+                  onPick={(label) => pickOption(q.options.map((option) => option.label), label)}
+                />
               ))}
               {msg.suggestions && msg.suggestions.length > 0 && (
                 <SuggestionList items={msg.suggestions} busy={busy} onSend={onSend} />

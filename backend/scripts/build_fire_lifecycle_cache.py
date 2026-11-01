@@ -26,7 +26,19 @@ from _rasterkit import (
     write_rgba_png,
 )
 
-CACHE_VERSION = 1
+#: Bump whenever the assets change, so the API rebuilds caches written by an
+#: older builder instead of serving them. 2: burned area coloured by burn age.
+#: 3: near-opaque colours; at 170 alpha under the map's layer opacity the
+#: earlier burn washed out to pale grey.
+CACHE_VERSION = 3
+
+#: Burned area is coloured by how long before the day shown each pixel first
+#: burned: that day in ember, the three days before it fading from amber, and
+#: everything earlier in the original grey-violet. One flat colour hid the
+#: fire's progress; this shows where it was moving on any day you pick.
+_BURNED_TODAY = (199, 110, 0, 255)
+_BURNED_RECENT = (233, 184, 112)
+_BURNED_EARLIER = (91, 83, 108, 205)
 
 
 def _dated_files(event_dir: Path) -> list[tuple[str, Path]]:
@@ -95,6 +107,35 @@ def _write_mask_png(
     )
 
 
+def _write_burn_age_png(
+    path: Path,
+    burn_day: np.ndarray,
+    day_index: int,
+    crop: tuple[int, int, int, int],
+    transform: tuple[float, ...],
+    projection: str,
+) -> None:
+    """Cumulative burned area through `day_index`, coloured by burn age.
+
+    Every burned pixel keeps a non-zero alpha, so readers that only ask "is this
+    pixel burned?" (the label-point extraction) see exactly what they saw before.
+    """
+    row0, row1, col0, col1 = crop
+    days = burn_day[row0:row1, col0:col1]
+    burned = (days >= 0) & (days <= day_index)
+    age = day_index - days
+    rgba = mask_rgba(burned, _BURNED_EARLIER)
+    for step in (1, 2, 3):
+        fade = (step - 1) / 3
+        colour = tuple(
+            round(recent + (earlier - recent) * fade)
+            for recent, earlier in zip(_BURNED_RECENT, _BURNED_EARLIER[:3], strict=True)
+        )
+        rgba[burned & (age == step)] = (*colour, 240)
+    rgba[burned & (age == 0)] = _BURNED_TODAY
+    write_rgba_png(path, rgba, cropped_transform(transform, row0, col0), projection)
+
+
 def build(
     event_dir: Path,
     output_dir: Path,
@@ -147,8 +188,10 @@ def build(
     pixel_area_km2 = pixel_width_km * pixel_height_km
 
     cumulative = np.zeros_like(event_union, dtype=bool)
+    #: Index of the day each pixel first burned, -1 where it never did.
+    burn_day = np.full(event_union.shape, -1, dtype=np.int16)
     timeline: list[dict[str, int | float | str]] = []
-    for date, path in dated_files:
+    for day_index, (date, path) in enumerate(dated_files):
         active, dataset = _read_label_mask(path, 7)
         burned, _ = _read_label_mask(path, 8)
         active &= active_domain
@@ -156,14 +199,15 @@ def build(
         previous = cumulative.copy()
         cumulative |= burned
         newly_burned = cumulative & ~previous
+        burn_day[newly_burned] = day_index
 
-        _write_mask_png(
+        _write_burn_age_png(
             assets_dir / f"{date}_burned_area.png",
-            cumulative,
+            burn_day,
+            day_index,
             crop,
             transform,
             projection,
-            (91, 83, 108, 170),
         )
         _write_mask_png(
             assets_dir / f"{date}_active_fire.png",
@@ -180,6 +224,9 @@ def build(
             {
                 "date": date,
                 "active_pixels": active_pixels,
+                # Inside the fire's final burned area. Heat outside it may be
+                # another source, so it is not counted as this fire's start.
+                "active_pixels_in_footprint": int((active & event_burned_domain).sum()),
                 "new_burned_pixels": new_pixels,
                 "cumulative_burned_pixels": cumulative_pixels,
                 "new_burned_km2": round(new_pixels * pixel_area_km2, 2),

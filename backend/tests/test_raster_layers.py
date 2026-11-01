@@ -8,6 +8,7 @@ from typing import ClassVar
 import pytest
 
 from wildfire_agent import raster_layers
+from wildfire_agent.config import Settings
 from wildfire_agent.contract import AnalysisContract, ScalarSlot, SpatialSlot
 from wildfire_agent.raster_layers import (
     FireRasterPlan,
@@ -202,6 +203,17 @@ def test_preview_path_requires_an_existing_hash(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("wildfire_agent.raster_layers._PREVIEW_ROOT", tmp_path)
     with pytest.raises(RasterLayerError, match="not found"):
         preview_path("a" * 32)
+
+
+def test_preview_root_keeps_the_macos_default():
+    assert Settings(_env_file=None).raster_preview_dir == Path(
+        "/private/tmp/firescope-raster-previews"
+    )
+
+
+def test_preview_root_can_be_moved_for_containers(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("RASTER_PREVIEW_DIR", str(tmp_path))
+    assert Settings(_env_file=None).raster_preview_dir == tmp_path
 
 
 def test_lifecycle_asset_path_rejects_path_traversal():

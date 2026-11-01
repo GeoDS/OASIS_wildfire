@@ -6,6 +6,7 @@ import itertools
 import math
 import re
 from dataclasses import dataclass
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -703,6 +704,55 @@ def communities_nearest_fire(
     )
 
 
+#: EPA AQI categories by upper bound, inclusive.
+_AQI_CATEGORIES = (
+    (50, "good"),
+    (100, "moderate"),
+    (150, "unhealthy for sensitive groups"),
+    (200, "unhealthy"),
+    (300, "very unhealthy"),
+)
+
+
+def _aqi_category(aqi: float) -> str:
+    return next((name for upper, name in _AQI_CATEGORIES if aqi <= upper), "hazardous")
+
+
+def _detection_days(detections: list[dict[str, Any]]) -> str:
+    """"on Oct 30" or "between Oct 30 and Oct 31", from the acquisition times."""
+    days = sorted(
+        {
+            str((f.get("properties") or {}).get("acquiredUtc") or "")[:10]
+            for f in detections
+            if (f.get("properties") or {}).get("acquiredUtc")
+        }
+    )
+    labels = []
+    for day in (days[0], days[-1]) if days else ():
+        try:
+            parsed = date.fromisoformat(day)
+        except ValueError:
+            return ""
+        labels.append(f"{parsed.strftime('%b')} {parsed.day}")
+    if not labels:
+        return ""
+    return f" on {labels[0]}" if labels[0] == labels[-1] else f" between {labels[0]} and {labels[-1]}"
+
+
+def _current_readings(weather: dict[str, Any], air: dict[str, Any]) -> list[str]:
+    """The weather and air figures a "right now" answer states, in reading order."""
+    readings = []
+    if weather.get("temperature") is not None:
+        readings.append(f"{weather['temperature']}°{weather.get('temperatureUnit') or 'F'}")
+    if weather.get("relativeHumidity") is not None:
+        readings.append(f"{weather['relativeHumidity']}% humidity")
+    if weather.get("windSpeed"):
+        readings.append(f"wind {weather.get('windDirection') or ''} {weather['windSpeed']}".replace("  ", " "))
+    if air.get("usAqi") is not None:
+        readings.append(f"AQI {air['usAqi']}")
+    return readings
+
+
 def city_context_status(
     city_name: str,
     perimeter_layer: LayerResult | None,
@@ -740,6 +790,11 @@ def city_context_status(
         )
         evidence = "low"
     details = [f"Current fire perimeters in scope: {perimeter_count}."]
+    # The answer sentence states what was fetched, not only the perimeter check.
+    # Asked "is there a fire near Riverside right now", the reply was a paragraph
+    # of caveats: weather and air quality were only in `details`, which the
+    # narrator is allowed to leave out.
+    sentences = [assessment]
     if firms_layer is not None:
         detections = firms_layer.geojson.get("features") or []
         if detections:
@@ -753,6 +808,13 @@ def city_context_status(
                 f"Satellite thermal detections in scope: {len(detections)}{strongest}. "
                 "A thermal anomaly is a hot pixel, not a mapped fire - flares, kilns and "
                 "industrial heat are detected the same way."
+            )
+            noun = "detection" if len(detections) == 1 else "detections"
+            sentences.append(
+                f"Satellites recorded {len(detections)} thermal {noun} in the area"
+                f"{_detection_days(detections)}"
+                + (f" (strongest {max(powers):.1f} MW)" if powers else "")
+                + "; these are hot pixels, not confirmed fires."
             )
         else:
             # "None" only means something beside how far back it looked, and the
@@ -772,12 +834,26 @@ def city_context_status(
             f"{weather.get('shortForecast') or 'forecast available'}, wind "
             f"{weather.get('windDirection') or '?'} {weather.get('windSpeed') or '?'}."
         )
+    readings = _current_readings(weather, air)
+    if readings:
+        now = [r for r in readings if not r.startswith("AQI")]
+        if weather.get("shortForecast"):
+            now.append(str(weather["shortForecast"]).lower())
+        if air.get("usAqi") is not None:
+            now_text = ", ".join(now)
+            air_text = f"air quality is {_aqi_category(air['usAqi'])} (AQI {air['usAqi']})"
+            sentences.append(f"Right now: {now_text}; {air_text}." if now else f"Right now {air_text}.")
+        else:
+            sentences.append(f"Right now: {', '.join(now)}.")
     return {
         "status": "city_assessed",
         "workflow": "city",
         "evidence": evidence,
-        "message": assessment,
+        "message": " ".join(sentences),
         "details": details,
+        #: What a "right now" reply must state; `narrate` falls back to `message`
+        #: when a draft leaves one out.
+        "current_readings": readings,
     }
 
 

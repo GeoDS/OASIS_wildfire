@@ -19,6 +19,9 @@ Anthropic and as a JSON schema on OpenAI; LangChain already hides the seam.
 from __future__ import annotations
 
 import functools
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .config import settings
@@ -61,6 +64,86 @@ def _provider_kwargs(provider: str) -> dict[str, Any]:
         kwargs["base_url"] = settings.llm_base_url
 
     return kwargs
+
+
+#: Per-turn token accounting. Registered as a LangChain configure hook, which
+#: is how `get_openai_callback` works: the handler attaches itself to every
+#: invocation made inside the context, so no call site has to pass it. That
+#: matters here because the calls are spread across the graph nodes, the
+#: planner, the resolver and three narration entry points, and a measurement
+#: that misses one of them is worse than none.
+#:
+#: Cost is not incidental for this deployment. The backend holds the key rather
+#: than asking a reviewer for theirs, so an unmetered turn is an unbounded bill.
+_usage_callback: ContextVar[Any | None] = ContextVar("wildfire_usage_callback", default=None)
+
+
+def _register_usage_hook() -> None:
+    # Lives in `tracers.context`, not `callbacks.manager`, in langchain-core 1.x.
+    from langchain_core.tracers.context import register_configure_hook
+
+    register_configure_hook(_usage_callback, inheritable=True)
+
+
+_register_usage_hook()
+
+
+def _usage_counter_class() -> type:
+    """Usage accumulation plus a round-trip count.
+
+    `UsageMetadataCallbackHandler` aggregates tokens per *model*, so it cannot
+    say how many times the model was called - and the round-trip count is the
+    number that explains both latency and why one task type costs more than
+    another with similar token totals.
+    """
+    from langchain_core.callbacks import UsageMetadataCallbackHandler
+
+    class _Counter(UsageMetadataCallbackHandler):  # type: ignore[misc]
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
+            self.call_count += 1
+            return super().on_llm_end(response, **kwargs)
+
+    return _Counter
+
+
+_UsageCounter = _usage_counter_class()
+
+
+@contextmanager
+def track_usage() -> Iterator[Any]:
+    """Accumulate token usage for everything invoked inside this block.
+
+    Yields the handler; read `.usage_metadata` after the block, keyed by model.
+    A turn that makes no model call yields an empty mapping rather than zero -
+    the two are different, and "no call" is the interesting one.
+    """
+    handler = _UsageCounter()
+    token = _usage_callback.set(handler)
+    try:
+        yield handler
+    finally:
+        _usage_callback.reset(token)
+
+
+def usage_totals(handler: Any) -> dict[str, Any]:
+    """Flatten a handler's per-model usage into one reportable record."""
+    per_model = dict(getattr(handler, "usage_metadata", {}) or {})
+    total_in = sum(int(v.get("input_tokens") or 0) for v in per_model.values())
+    total_out = sum(int(v.get("output_tokens") or 0) for v in per_model.values())
+    return {
+        "input_tokens": total_in,
+        "output_tokens": total_out,
+        "total_tokens": total_in + total_out,
+        # Round trips, not models. A turn that calls one model four times and a
+        # turn that calls it once are different turns at the same token total.
+        "calls": int(getattr(handler, "call_count", 0)),
+        "models": len(per_model),
+        "by_model": per_model,
+    }
 
 
 def is_mock() -> bool:

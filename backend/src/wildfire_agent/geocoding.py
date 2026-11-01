@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 
 import httpx
@@ -17,7 +17,7 @@ import httpx
 from .config import settings
 from .contract import ResolvedLocation
 from .local_catalog import scan_local_data
-from .request_intent import requests_fire
+from .request_intent import names_fire_incident, requests_fire
 
 #: Offline fallback gazetteer. Used only when Nominatim is unreachable, and the
 #: `geocoder` field then says `fallback_gazetteer` - **provenance must stay
@@ -108,20 +108,35 @@ def _normalise_fire_name(value: str) -> str:
     return " ".join(word for word in re.findall(r"[a-z0-9]+", value.lower()) if word not in ignored)
 
 
+@dataclass(frozen=True)
+class _LocalFire:
+    key: str
+    candidate: GeocodeCandidate
+    #: Named for a place ("Lake Hughes") rather than a fire. Matched only where
+    #: the words name it as a fire, so "a fire near San Bernardino" stays the city.
+    place_named: bool
+    #: First and last day of the daily record, not the annual land-cover epoch.
+    period: tuple[str, str] | None
+
+
 @lru_cache(maxsize=1)
-def _local_fire_gazetteer() -> tuple[tuple[str, GeocodeCandidate], ...]:
-    """Build event centres from the local catalog instead of a UI-maintained list."""
-    entries: dict[str, GeocodeCandidate] = {}
+def _local_fire_gazetteer() -> tuple[_LocalFire, ...]:
+    """Build event centres from the local catalog instead of a UI-maintained list.
+
+    Every archived event is here. Requiring "fire" in the event's name left out
+    the four named for a place - Lake Hughes, Mojave / I-15, San Bernardino,
+    Santa Barbara Co. - so "the Lake Hughes fire" went to the web geocoder and
+    came back as a fire station. `plan_fire_raster` dropped that guard earlier
+    for the same reason; this is the location step catching up.
+    """
+    entries: dict[str, _LocalFire] = {}
+    periods: dict[str, tuple[str, str]] = {}
     try:
         datasets = scan_local_data(settings.resolved_local_data_root).datasets
     except (FileNotFoundError, OSError):
         return ()
     for dataset in datasets:
-        if (
-            not dataset.event_name
-            or not re.search(r"\bfire\b", dataset.event_name, re.IGNORECASE)
-            or not dataset.spatial_scope
-        ):
+        if not dataset.event_name or not dataset.spatial_scope:
             continue
         match = re.search(
             r"(?P<lat>-?\d{1,2}(?:\.\d+)?),\s*(?P<lon>-?\d{1,3}(?:\.\d+)?)",
@@ -130,25 +145,45 @@ def _local_fire_gazetteer() -> tuple[tuple[str, GeocodeCandidate], ...]:
         if not match:
             continue
         key = _normalise_fire_name(dataset.event_name)
-        entries[key] = GeocodeCandidate(
-            display_name=dataset.event_name.removesuffix(" area"),
-            lon=float(match.group("lon")),
-            lat=float(match.group("lat")),
-            source="local_fire_catalog",
+        if "VIIRS_Day" in dataset.variables and dataset.time_start and dataset.time_end:
+            periods[key] = (dataset.time_start, dataset.time_end)
+        entries[key] = _LocalFire(
+            key=key,
+            candidate=GeocodeCandidate(
+                display_name=dataset.event_name.removesuffix(" area"),
+                lon=float(match.group("lon")),
+                lat=float(match.group("lat")),
+                source="local_fire_catalog",
+            ),
+            place_named=not re.search(r"\bfire\b", dataset.event_name, re.IGNORECASE),
+            period=None,
         )
-    return tuple(entries.items())
+    return tuple(replace(entry, period=periods.get(key)) for key, entry in entries.items())
+
+
+def _local_fire_match(query: str) -> _LocalFire | None:
+    normalized = f" {_normalise_fire_name(query)} "
+    matches = [
+        entry
+        for entry in _local_fire_gazetteer()
+        if entry.key
+        and f" {entry.key} " in normalized
+        and (not entry.place_named or names_fire_incident(query, entry.key))
+    ]
+    return max(matches, key=lambda entry: len(entry.key)) if matches else None
 
 
 def _local_fire_candidates(query: str) -> list[GeocodeCandidate]:
-    normalized = f" {_normalise_fire_name(query)} "
-    matches = [
-        (len(key), candidate)
-        for key, candidate in _local_fire_gazetteer()
-        if key and f" {key} " in normalized
-    ]
-    if not matches:
-        return []
-    return [max(matches, key=lambda item: item[0])[1]]
+    match = _local_fire_match(query)
+    return [match.candidate] if match else []
+
+
+def local_fire_period(query: str) -> tuple[str, str] | None:
+    """The first and last day archived for the fire this names, if it names one."""
+    if not requests_fire(query):
+        return None
+    match = _local_fire_match(query)
+    return match.period if match else None
 
 
 def resolve_local_fire(

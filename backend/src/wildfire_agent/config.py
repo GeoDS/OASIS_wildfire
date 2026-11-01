@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     #: trusted code performs the scan and validates every selected dataset id.
     local_data_root: Path = REPO_ROOT / "backend" / "data"
     session_db_path: Path = REPO_ROOT / ".runtime" / "wildfire-sessions.sqlite3"
+    #: Rendered raster previews and lifecycle caches. `/private/tmp` exists only
+    #: on macOS, so containers point this somewhere writable.
+    raster_preview_dir: Path = Path("/private/tmp/firescope-raster-previews")
 
     # ── Service ─────────────────────────────────────────────────────
     #: Census Data API key. Free, but now required for every query - the old
